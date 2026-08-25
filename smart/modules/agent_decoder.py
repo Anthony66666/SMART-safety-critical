@@ -10,6 +10,8 @@ from torch_geometric.data import Batch, HeteroData
 from torch_geometric.utils import dense_to_sparse, subgraph
 from smart.utils import angle_between_2d_vectors, weight_init, wrap_angle
 from smart.safety.likelihood import SequenceLikelihood
+from smart.safety.ego import PlanningContext
+from smart.safety.tokenization import nearest_token
 import math
 
 
@@ -352,7 +354,8 @@ class SMARTAgentDecoder(nn.Module):
 
     def inference(self,
                   data: HeteroData,
-                  map_enc: Mapping[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+                  map_enc: Mapping[str, torch.Tensor],
+                  ego_planner=None) -> Dict[str, torch.Tensor]:
         eval_mask = data['agent']['valid_mask'][:, self.num_historical_steps - 1]
         pos_a = data['agent']['token_pos'].clone()
         head_a = data['agent']['token_heading'].clone()
@@ -386,6 +389,12 @@ class SMARTAgentDecoder(nn.Module):
         pred_prob = torch.zeros(data["agent"].num_nodes, self.num_recurrent_steps_val // self.shift, device=feat_a.device)
         next_token_idx_list = []
         likelihood = SequenceLikelihood(data["agent"].num_nodes, device=feat_a.device)
+        # An externally driven ego is not sampled from the model, so counting it
+        # would corrupt both the realism score and every importance weight.
+        ego_index = int(data['agent']['av_index']) if ego_planner is not None else None
+        likelihood_mask = eval_mask.clone()
+        if ego_index is not None:
+            likelihood_mask[ego_index] = False
         mask = agent_valid_mask.clone()
         feat_a_t_dict = {}
         for t in range(self.num_recurrent_steps_val // self.shift):
@@ -464,7 +473,7 @@ class SMARTAgentDecoder(nn.Module):
             # same mass renormalised over the top-k, hence topk_prob.sum(-1).
             likelihood.update(p_chosen=pred_prob[:, t],
                               topk_sum=topk_prob.sum(dim=-1),
-                              valid=eval_mask)
+                              valid=likelihood_mask)
             pred_traj[:, t * 5:(t + 1) * 5] = agent_pred_rel[:, 1:, ...].clone().mean(dim=2)
             diff_xy = agent_pred_rel[:, 1:, 0, :] - agent_pred_rel[:, 1:, 3, :]
             pred_head[:, t * 5:(t + 1) * 5] = torch.arctan2(diff_xy[:, :, 1], diff_xy[:, :, 0])
@@ -475,6 +484,29 @@ class SMARTAgentDecoder(nn.Module):
             head_a[:, (self.num_historical_steps - 1) // self.shift + t] = theta
             next_token_idx = next_token_idx.gather(dim=1, index=sample_index)
             next_token_idx = next_token_idx.squeeze(-1)
+            if ego_planner is not None:
+                step_idx = (self.num_historical_steps - 1) // self.shift + t
+                prev_pos = pos_a[ego_index, step_idx - 1]
+                prev_head = head_a[ego_index, step_idx - 1]
+                planned = ego_planner.plan(PlanningContext(
+                    step=t,
+                    ego_state=torch.cat([prev_pos, prev_head.reshape(1)]),
+                    neighbor_states=torch.cat(
+                        [pos_a[:, step_idx - 1], head_a[:, step_idx - 1, None]], dim=-1),
+                    ego_speed=float(torch.norm(
+                        pos_a[ego_index, step_idx - 1] - pos_a[ego_index, step_idx - 2])
+                        / (self.shift * 0.1)),
+                )).to(pos_a.device)
+                pred_traj[ego_index, t * self.shift:(t + 1) * self.shift] = planned[:, :2]
+                pred_head[ego_index, t * self.shift:(t + 1) * self.shift] = planned[:, 2]
+                pos_a[ego_index, step_idx] = planned[-1, :2]
+                head_a[ego_index, step_idx] = planned[-1, 2]
+                # Re-project onto the token grid so the next step's embedding
+                # stays in the space the model was trained on.
+                next_token_idx[ego_index] = nearest_token(
+                    prev_pos[None], prev_head[None],
+                    planned[-1, :2][None], planned[-1, 2][None],
+                    agent_token_traj_all[ego_index, :, -1])
             next_token_idx_list.append(next_token_idx[:, None])
             agent_token_emb[veh_mask, (self.num_historical_steps - 1) // self.shift + t] = self.agent_token_emb_veh[
                 next_token_idx[veh_mask]]
