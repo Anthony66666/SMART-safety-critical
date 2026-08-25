@@ -23,8 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from smart.datasets.scalable_dataset import MultiDataset
 from smart.model import SMART
-from smart.safety.scoring import (RealismReport, borrow_tokens, permute_agents,
-                                  prepare_scenario, score_tokens)
+from smart.safety.scoring import (RealismReport, bits_per_dim, borrow_tokens,
+                                  permute_agents, prepare_scenario, score_tokens)
+from smart.safety.splits import SplitSpec, assign_split
 from smart.transforms import WaymoTargetBuilder
 from smart.utils.config import load_config_act
 from smart.utils.log import Logging
@@ -45,15 +46,38 @@ def mean_per_step(log_p, eval_mask, num_steps):
     return float(simulated.sum() / (simulated.numel() * num_steps))
 
 
+def stats_per_step(log_p, eval_mask, num_steps):
+    """Mean plus lower-tail statistics of the per-agent likelihood.
+
+    Averaging over every agent dilutes the few that are actually implausible,
+    which is precisely the situation in an adversarial scenario. The tail
+    statistics are kept so that aggregation choices can be compared without
+    re-running generation.
+    """
+    simulated = log_p[eval_mask] / num_steps
+    if simulated.numel() == 0:
+        return None
+    q = torch.tensor([0.10, 0.25, 0.50], device=simulated.device)
+    p10, p25, median = torch.quantile(simulated.float(), q).tolist()
+    return {'mean': float(simulated.mean()), 'min': float(simulated.min()),
+            'p10': p10, 'p25': p25, 'median': median}
+
+
 def main():
     parser = ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/validation/validation_scalable.yaml')
     parser.add_argument('--generator_ckpt', type=str, default='checkpoints/epoch=31.ckpt')
     parser.add_argument('--judge_ckpt', type=str, default='')
     parser.add_argument('--num_scenarios', type=int, default=11)
+    parser.add_argument('--data_dir', type=str, default='',
+                        help='override the config validation directory')
+    parser.add_argument('--fraction', type=float, default=0.0,
+                        help='deterministic hash subset of the directory, e.g. 0.1')
     parser.add_argument('--allow_self_judge', action='store_true')
     parser.add_argument('--beam_size', type=int, default=0,
                         help='override sampling truncation; 0 keeps the config value')
+    parser.add_argument('--num_workers', type=int, default=8,
+                        help='dataloader workers; preprocessing dominates runtime')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--out', type=str, default='')
     args = parser.parse_args()
@@ -67,10 +91,22 @@ def main():
     if args.beam_size:
         config.Model.decoder.beam_size = args.beam_size
     dc = config.Dataset
-    dataset = MultiDataset(root=dc.root, split='val', raw_dir=dc.val_raw_dir,
+    raw_dir = [args.data_dir] if args.data_dir else dc.val_raw_dir
+    scenario_ids = None
+    if args.fraction:
+        # Hash-based so the same subset comes back on any machine.
+        spec = SplitSpec(fractions={'keep': args.fraction, 'drop': 1.0 - args.fraction},
+                         salt='diagnostic-v1')
+        scenario_ids = {
+            os.path.splitext(f)[0]
+            for d in raw_dir for f in os.listdir(d)
+            if assign_split(os.path.splitext(f)[0], spec) == 'keep'}
+        print(f'subset: {len(scenario_ids)} scenarios ({args.fraction:.0%} of {raw_dir})')
+    dataset = MultiDataset(root=dc.root, split='val', raw_dir=raw_dir,
                            processed_dir=dc.val_processed_dir,
                            transform=WaymoTargetBuilder(config.Model.num_historical_steps,
-                                                        config.Model.decoder.num_future_steps))
+                                                        config.Model.decoder.num_future_steps),
+                           scenario_ids=scenario_ids)
 
     generator = load_model(config, args.generator_ckpt)
     judge = generator if report.self_judged else load_model(config, judge_ckpt)
@@ -80,7 +116,10 @@ def main():
     offset = (hist - 1) // shift
 
     donor = None
-    for i, batch in enumerate(DataLoader(dataset, batch_size=1, shuffle=False)):
+    loader = DataLoader(dataset, batch_size=1, shuffle=False,
+                        num_workers=args.num_workers,
+                        persistent_workers=args.num_workers > 0)
+    for i, batch in enumerate(loader):
         if i >= args.num_scenarios:
             break
         # One prepared scenario for both models: preparing separately would
@@ -98,20 +137,17 @@ def main():
         row = {
             'scenario': str(data['scenario_id'][0]) if 'scenario_id' in data else str(i),
             'num_agents': int(eval_mask.sum()),
-            'logged': mean_per_step(score_tokens(judge, data, logged_tokens),
-                                    eval_mask, num_steps),
-            'generated': mean_per_step(score_tokens(judge, data, rollout['next_token_idx']),
-                                       eval_mask, num_steps),
-            'permuted': mean_per_step(
-                score_tokens(judge, data, permute_agents(logged_tokens, seed=args.seed)),
-                eval_mask, num_steps),
         }
-        # Anchor from a different scenario entirely. The first iteration has no
-        # donor yet, so it contributes to the other columns only.
+        raw = {
+            'logged': score_tokens(judge, data, logged_tokens),
+            'generated': score_tokens(judge, data, rollout['next_token_idx']),
+            'permuted': score_tokens(judge, data, permute_agents(logged_tokens, seed=args.seed)),
+        }
         if donor is not None:
-            row['borrowed'] = mean_per_step(
-                score_tokens(judge, data, borrow_tokens(donor, eval_mask.shape[0])),
-                eval_mask, num_steps)
+            raw['borrowed'] = score_tokens(judge, data, borrow_tokens(donor, eval_mask.shape[0]))
+        for name, value in raw.items():
+            row[name] = mean_per_step(value, eval_mask, num_steps)
+            row[name + '_stats'] = stats_per_step(value, eval_mask, num_steps)
         donor = logged_tokens
         report.scores.append(row)
 
@@ -128,13 +164,24 @@ def main():
               ('generated', 'this generator'),
               ('permuted', 'own tokens, wrong agents'),
               ('borrowed', 'another scenario entirely')]
-    print(f'  {"":<26} {"log p / agent-step":>18}  {"vs logged":>10}')
+    def stat_of(key, agg):
+        vals = [s[key + '_stats'][agg] for s in usable if s.get(key + '_stats')]
+        return sum(vals) / len(vals) if vals else None
+
+    # The lower tail is the headline: the mean cancels a positive tail effect
+    # against a negative median effect and separates nothing. See the note in
+    # smart/safety/scoring.py for the measured comparison.
+    print(f'  {"":<26} {"min":>8} {"p10":>8} {"mean":>9} {"bpd":>7}   {"tail vs logged":>14}')
+    log_tail = stat_of('logged', 'min')
     for key, label in labels:
         value = mean_of(key)
         if value is None:
             continue
-        delta = '' if key == 'logged' else f'{value - log:+10.4f}'
-        print(f'  {label:<26} {value:>18.4f}  {delta:>10}')
+        tail = stat_of(key, 'min')
+        p10 = stat_of(key, 'p10')
+        delta = '' if key == 'logged' else f'{tail - log_tail:+14.3f}'
+        print(f'  {label:<26} {tail:>8.3f} {p10:>8.3f} {value:>9.3f} '
+              f'{bits_per_dim(value):>7.3f}   {delta:>14}')
     caveat = report.caveat()
     if caveat:
         print(f'\n  !! {caveat}')
@@ -146,6 +193,8 @@ def main():
                        'self_judged': report.self_judged,
                        'caveat': caveat,
                        'means': {k: mean_of(k) for k, _ in labels},
+                       'tail_min': {k: stat_of(k, 'min') for k, _ in labels},
+                       'tail_p10': {k: stat_of(k, 'p10') for k, _ in labels},
                        'scores': report.scores}, f, indent=2)
         print(f'\nwrote {args.out}')
 

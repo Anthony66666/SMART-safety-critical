@@ -119,3 +119,38 @@ def test_permuting_agents_is_reproducible():
     tokens = torch.arange(6 * 16).reshape(6, 16)
 
     assert torch.equal(permute_agents(tokens, seed=3), permute_agents(tokens, seed=3))
+
+
+# --- realism statistics ------------------------------------------------------
+
+def test_bits_per_dimension_rescales_nats():
+    """BPD is the standard unit, and nothing more than a change of base: it
+    carries exactly the information the nats-per-agent-step figure does."""
+    from smart.safety.scoring import bits_per_dim
+    import math
+
+    assert bits_per_dim(-math.log(2.0)) == pytest.approx(1.0)
+    assert bits_per_dim(-2.0 * math.log(2.0)) == pytest.approx(2.0)
+
+
+def test_bits_per_dimension_preserves_ordering():
+    from smart.safety.scoring import bits_per_dim
+
+    assert bits_per_dim(-2.385) < bits_per_dim(-3.772)
+
+
+def test_typicality_is_zero_at_the_reference_entropy():
+    """A sequence whose average surprisal equals the reference sits exactly on
+    the typical set."""
+    from smart.safety.scoring import typicality
+
+    assert typicality(log_p_per_dim=-3.772, reference_entropy=3.772) == pytest.approx(0.0)
+
+
+def test_typicality_grows_in_both_directions():
+    """Too likely is as atypical as too unlikely -- which is why typicality
+    cannot double as a realism score when the model is over-dispersed."""
+    from smart.safety.scoring import typicality
+
+    assert typicality(-2.0, 3.0) == pytest.approx(1.0)
+    assert typicality(-4.0, 3.0) == pytest.approx(1.0)

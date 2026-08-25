@@ -18,6 +18,8 @@ are handled here rather than left to callers:
 from dataclasses import dataclass, field
 from typing import Optional
 
+import math
+
 import torch
 
 
@@ -150,3 +152,48 @@ def permute_agents(tokens: torch.Tensor, seed: int = 0) -> torch.Tensor:
     if num_agents > 1 and bool((order == torch.arange(num_agents)).all()):
         order = order.roll(1)
     return tokens[order.to(tokens.device)].contiguous()
+
+
+# --- realism statistics ------------------------------------------------------
+#
+# Measured on 60 WOMD validation scenarios (self-judged, full support), the
+# choice of statistic decides whether the realism axis works at all:
+#
+#   statistic   logged vs generated   generated vs permuted
+#   mean              t=+21.3               t=+0.65   blind
+#   median            t=+15.1               t=-3.56   reversed
+#   p10               t=+22.5               t=+5.38
+#   min               t=+12.7               t=+10.3
+#
+# Scrambled scenarios are mostly fine agents plus a few impossible ones, while
+# samples from the model are uniformly typical. The mean averages a positive
+# tail effect against a negative median effect and cancels itself out. The
+# lower tail is what separates them -- and "is any agent doing something
+# impossible" is the question safety-critical realism actually asks.
+
+
+def bits_per_dim(log_p_per_dim: float) -> float:
+    """Convert a per-dimension log-likelihood in nats to bits per dimension.
+
+    The standard reporting unit, and a pure change of base: it reorders
+    nothing and separates nothing that nats did not already separate. Useful
+    for comparison against published numbers, not as a sharper instrument.
+    """
+    return -log_p_per_dim / math.log(2.0)
+
+
+def typicality(log_p_per_dim: float, reference_entropy: float) -> float:
+    """Distance from the typical set: |-log p per dim - reference|.
+
+    High-dimensional samples from a model concentrate near its entropy rather
+    than near its mode, so a low likelihood does not by itself mean a sample
+    is unrealistic. This measures deviation in either direction.
+
+    Note the reference choice decides what the number means, and neither
+    choice yields a usable realism score here. Referenced to the model's own
+    entropy it ranks real traffic as the least typical of all (the model is
+    over-dispersed: H=3.77 nats against a cross-entropy of 2.39). Referenced
+    to the data cross-entropy it orders things correctly but no longer
+    separates generated scenarios from scrambled ones (t=-1.61).
+    """
+    return abs(-log_p_per_dim - reference_entropy)
