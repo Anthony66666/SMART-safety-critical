@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 .github
 ckpt/
+checkpoints/
+*.ckpt
 # assets/
 # C extensions
 *.so
