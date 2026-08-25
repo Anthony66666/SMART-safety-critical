@@ -26,6 +26,7 @@ class SMARTDecoder(nn.Module):
                  map_token: Dict,
                  token_data: Dict,
                  use_intention=False,
+                 beam_size: int = 5,
                  token_size=512) -> None:
         super(SMARTDecoder, self).__init__()
         self.map_encoder = SMARTMapDecoder(
@@ -55,7 +56,8 @@ class SMARTDecoder(nn.Module):
             head_dim=head_dim,
             dropout=dropout,
             token_size=token_size,
-            token_data=token_data
+            token_data=token_data,
+            beam_size=beam_size
         )
         self.map_enc = None
 

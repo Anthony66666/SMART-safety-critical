@@ -91,7 +91,8 @@ class SMART(pl.LightningModule):
             time_span=model_config.decoder.time_span,
             map_token={'traj_src': self.map_token['traj_src']},
             token_data=token_data,
-            token_size=model_config.decoder.token_size
+            token_size=model_config.decoder.token_size,
+            beam_size=getattr(model_config.decoder, 'beam_size', 5)
         )
         self.minADE = minADE(max_guesses=1)
         self.minFDE = minFDE(max_guesses=1)

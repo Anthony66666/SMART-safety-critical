@@ -9,6 +9,7 @@ from torch_cluster import radius, radius_graph
 from torch_geometric.data import Batch, HeteroData
 from torch_geometric.utils import dense_to_sparse, subgraph
 from smart.utils import angle_between_2d_vectors, weight_init, wrap_angle
+from smart.safety.likelihood import SequenceLikelihood
 import math
 
 
@@ -49,7 +50,8 @@ class SMARTAgentDecoder(nn.Module):
                  head_dim: int,
                  dropout: float,
                  token_data: Dict,
-                 token_size=512) -> None:
+                 token_size=512,
+                 beam_size: int = 5) -> None:
         super(SMARTAgentDecoder, self).__init__()
         self.dataset = dataset
         self.input_dim = input_dim
@@ -104,7 +106,7 @@ class SMARTAgentDecoder(nn.Module):
         self.trajectory_token_all = token_data['token_all']
         self.apply(weight_init)
         self.shift = 5
-        self.beam_size = 5
+        self.beam_size = beam_size
         self.hist_mask = True
 
     def transform_rel(self, token_traj, prev_pos, prev_heading=None):
@@ -383,6 +385,7 @@ class SMARTAgentDecoder(nn.Module):
         pred_head = torch.zeros(data["agent"].num_nodes, self.num_recurrent_steps_val, device=feat_a.device)
         pred_prob = torch.zeros(data["agent"].num_nodes, self.num_recurrent_steps_val // self.shift, device=feat_a.device)
         next_token_idx_list = []
+        likelihood = SequenceLikelihood(data["agent"].num_nodes, device=feat_a.device)
         mask = agent_valid_mask.clone()
         feat_a_t_dict = {}
         for t in range(self.num_recurrent_steps_val // self.shift):
@@ -456,6 +459,12 @@ class SMARTAgentDecoder(nn.Module):
                                                    index=sample_index[..., None, None, None].expand(-1, -1, 6, 4,
                                                                                                     2))[:, 0, ...]
             pred_prob[:, t] = topk_prob.gather(dim=-1, index=sample_index)[:, 0]
+            # topk_prob comes from the full softmax and is NOT renormalised, so it
+            # is the exact model probability p. The sampling distribution q is that
+            # same mass renormalised over the top-k, hence topk_prob.sum(-1).
+            likelihood.update(p_chosen=pred_prob[:, t],
+                              topk_sum=topk_prob.sum(dim=-1),
+                              valid=eval_mask)
             pred_traj[:, t * 5:(t + 1) * 5] = agent_pred_rel[:, 1:, ...].clone().mean(dim=2)
             diff_xy = agent_pred_rel[:, 1:, 0, :] - agent_pred_rel[:, 1:, 3, :]
             pred_head[:, t * 5:(t + 1) * 5] = torch.arctan2(diff_xy[:, :, 1], diff_xy[:, :, 0])
@@ -505,5 +514,7 @@ class SMARTAgentDecoder(nn.Module):
             'next_token_idx_gt': agent_token_index.roll(shifts=-1, dims=1),
             'next_token_eval_mask': data['agent']['agent_valid_mask'],
             'pred_prob': pred_prob,
+            'log_p': likelihood.log_p,
+            'log_q': likelihood.log_q,
             'vel': vel
         }
