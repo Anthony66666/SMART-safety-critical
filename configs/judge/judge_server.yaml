@@ -1,0 +1,83 @@
+# Independent judge likelihood model -- full scale (8x A800).
+#
+# The judge scores the realism of generated scenarios. It must not be the
+# generator: architecture differs in width and depth, not only in seed.
+#
+# CAVEAT: this judge shares its training data with the generator
+# (checkpoints/epoch=31.ckpt was trained on the full WOMD training split).
+# Independence therefore rests on architecture and initialisation alone.
+# Evaluation still happens on the WOMD validation split, which the generator
+# never trained on. To upgrade to fully disjoint training data later, point
+# train_raw_dir at a split and set train_split.
+time_info: &time_info
+  num_historical_steps: 11
+  num_future_steps: 80
+  use_intention: True
+  token_size: 2048
+
+Split:
+  salt: "judge-v1"
+  fractions:
+    judge_val: 0.3
+    eval: 0.7
+  train_split:          # empty -> judge trains on the whole training directory
+  val_split: "judge_val"
+
+Dataset:
+  root:
+  train_batch_size: 4
+  val_batch_size: 4
+  test_batch_size: 4
+  shuffle: True
+  num_workers: 8
+  pin_memory: True
+  persistent_workers: True
+  train_raw_dir: ["/home/anthony/SimAgentJEPA/data/waymo/training"]
+  val_raw_dir: ["/home/anthony/SimAgentJEPA/data/waymo/validation"]
+  test_raw_dir:
+  transform: WaymoTargetBuilder
+  train_processed_dir:
+  val_processed_dir:
+  test_processed_dir:
+  dataset: "scalable"
+  <<: *time_info
+
+Trainer:
+  strategy: ddp_find_unused_parameters_false
+  accelerator: "gpu"
+  devices: 8
+  max_epochs: 32
+  save_ckpt_path:
+  num_nodes: 1
+  mode:
+  ckpt_path:
+  precision: 32
+  accumulate_grad_batches: 1
+  seed: 20260825
+
+Model:
+  mode: "train"
+  predictor: "smart"
+  dataset: "waymo"
+  input_dim: 2
+  # Deliberately unlike the generator (128 / 8 heads / 16 head_dim).
+  hidden_dim: 192
+  output_dim: 2
+  output_head: False
+  num_heads: 6
+  <<: *time_info
+  head_dim: 32
+  dropout: 0.1
+  num_freq_bands: 64
+  lr: 0.0005
+  warmup_steps: 0
+  total_steps: 32
+  decoder:
+    <<: *time_info
+    # Generator uses 6 agent / 3 map layers.
+    num_map_layers: 2
+    num_agent_layers: 4
+    a2a_radius: 60
+    pl2pl_radius: 10
+    pl2a_radius: 30
+    time_span: 30

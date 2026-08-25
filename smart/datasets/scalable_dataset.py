@@ -27,7 +27,8 @@ class MultiDataset(Dataset):
                  cluster: bool = False,
                  processor=None,
                  use_intention=False,
-                 token_size=512) -> None:
+                 token_size=512,
+                 scenario_ids: Optional[set] = None) -> None:
         self.logger = Logging().log(level='DEBUG')
         self.root = root
         self.well_done = [0]
@@ -45,6 +46,11 @@ class MultiDataset(Dataset):
                 raw_dir = os.path.expanduser(os.path.normpath(raw_dir))
                 dataset = "waymo"
                 file_list = os.listdir(raw_dir)
+                if scenario_ids is not None:
+                    # Restrict to one split so the judge never trains on the
+                    # scenarios it will later be asked to score.
+                    file_list = [f for f in file_list
+                                 if os.path.splitext(f)[0] in scenario_ids]
                 self._raw_file_names.extend(file_list)
                 self._raw_paths.extend([os.path.join(raw_dir, f) for f in file_list])
                 self._raw_file_dataset.extend([dataset for _ in range(len(file_list))])
