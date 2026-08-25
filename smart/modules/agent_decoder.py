@@ -355,7 +355,8 @@ class SMARTAgentDecoder(nn.Module):
     def inference(self,
                   data: HeteroData,
                   map_enc: Mapping[str, torch.Tensor],
-                  ego_planner=None) -> Dict[str, torch.Tensor]:
+                  ego_planner=None,
+                  forced_tokens: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         eval_mask = data['agent']['valid_mask'][:, self.num_historical_steps - 1]
         pos_a = data['agent']['token_pos'].clone()
         head_a = data['agent']['token_heading'].clone()
@@ -446,7 +447,16 @@ class SMARTAgentDecoder(nn.Module):
 
             next_token_prob_softmax = torch.softmax(next_token_prob, dim=-1)
 
-            topk_prob, next_token_idx = torch.topk(next_token_prob_softmax, k=self.beam_size, dim=-1)
+            if forced_tokens is not None:
+                # Scoring someone else's scenario: pin the token rather than
+                # sample it, and read off this model's probability for it.
+                # A pinned choice is a beam of width one, so the geometry and
+                # bookkeeping below need no special case.
+                next_token_idx = forced_tokens[:, t:t + 1].to(next_token_prob_softmax.device)
+                topk_prob = next_token_prob_softmax.gather(dim=-1, index=next_token_idx)
+            else:
+                topk_prob, next_token_idx = torch.topk(next_token_prob_softmax, k=self.beam_size, dim=-1)
+            beam = next_token_idx.shape[-1]
 
             expanded_index = next_token_idx[..., None, None, None].expand(-1, -1, 6, 4, 2)
             next_token_traj = torch.gather(agent_token_traj_all, 1, expanded_index)
@@ -459,8 +469,8 @@ class SMARTAgentDecoder(nn.Module):
             rot_mat[:, 1, 0] = -sin
             rot_mat[:, 1, 1] = cos
             agent_diff_rel = torch.bmm(next_token_traj.view(-1, 4, 2),
-                                       rot_mat[:, None, None, ...].repeat(1, self.beam_size, self.shift + 1, 1, 1).view(
-                                           -1, 2, 2)).view(num_agent, self.beam_size, self.shift + 1, 4, 2)
+                                       rot_mat[:, None, None, ...].repeat(1, beam, self.shift + 1, 1, 1).view(
+                                           -1, 2, 2)).view(num_agent, beam, self.shift + 1, 4, 2)
             agent_pred_rel = agent_diff_rel + pos_a[:, (self.num_historical_steps - 1) // self.shift - 1 + t, :][:, None, None, None, ...]
 
             sample_index = torch.multinomial(topk_prob, 1).to(agent_pred_rel.device)

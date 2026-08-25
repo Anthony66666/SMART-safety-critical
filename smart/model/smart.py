@@ -126,8 +126,9 @@ class SMART(pl.LightningModule):
         res = self.encoder(data)
         return res
 
-    def inference(self, data: HeteroData, ego_planner=None):
-        res = self.encoder.inference(data, ego_planner=ego_planner)
+    def inference(self, data: HeteroData, ego_planner=None, forced_tokens=None):
+        res = self.encoder.inference(data, ego_planner=ego_planner,
+                                     forced_tokens=forced_tokens)
         return res
 
     def maybe_autocast(self, dtype=torch.float16):
