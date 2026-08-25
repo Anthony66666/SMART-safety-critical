@@ -23,7 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from smart.datasets.scalable_dataset import MultiDataset
 from smart.model import SMART
-from smart.safety.scoring import RealismReport, prepare_scenario, score_tokens
+from smart.safety.scoring import (RealismReport, borrow_tokens, permute_agents,
+                                  prepare_scenario, score_tokens)
 from smart.transforms import WaymoTargetBuilder
 from smart.utils.config import load_config_act
 from smart.utils.log import Logging
@@ -78,6 +79,7 @@ def main():
     shift = 5
     offset = (hist - 1) // shift
 
+    donor = None
     for i, batch in enumerate(DataLoader(dataset, batch_size=1, shuffle=False)):
         if i >= args.num_scenarios:
             break
@@ -93,25 +95,46 @@ def main():
 
         logged_tokens = data['agent']['token_idx'][:, offset:offset + num_steps].contiguous()
 
-        generated_score = score_tokens(judge, data, rollout['next_token_idx'])
-        logged_score = score_tokens(judge, data, logged_tokens)
-
-        report.scores.append({
+        row = {
             'scenario': str(data['scenario_id'][0]) if 'scenario_id' in data else str(i),
             'num_agents': int(eval_mask.sum()),
-            'generated': mean_per_step(generated_score, eval_mask, num_steps),
-            'logged': mean_per_step(logged_score, eval_mask, num_steps),
-        })
+            'logged': mean_per_step(score_tokens(judge, data, logged_tokens),
+                                    eval_mask, num_steps),
+            'generated': mean_per_step(score_tokens(judge, data, rollout['next_token_idx']),
+                                       eval_mask, num_steps),
+            'permuted': mean_per_step(
+                score_tokens(judge, data, permute_agents(logged_tokens, seed=args.seed)),
+                eval_mask, num_steps),
+        }
+        # Anchor from a different scenario entirely. The first iteration has no
+        # donor yet, so it contributes to the other columns only.
+        if donor is not None:
+            row['borrowed'] = mean_per_step(
+                score_tokens(judge, data, borrow_tokens(donor, eval_mask.shape[0])),
+                eval_mask, num_steps)
+        donor = logged_tokens
+        report.scores.append(row)
 
     usable = [s for s in report.scores if s['generated'] is not None]
-    gen = sum(s['generated'] for s in usable) / len(usable)
-    log = sum(s['logged'] for s in usable) / len(usable)
+
+    def mean_of(key):
+        vals = [s[key] for s in usable if s.get(key) is not None]
+        return sum(vals) / len(vals) if vals else None
 
     beam = getattr(config.Model.decoder, 'beam_size', 5)
     print(f'\nscenarios: {len(usable)}   judge: {os.path.basename(judge_ckpt)}   beam_size: {beam}')
-    print(f'  logged    log p / agent-step: {log:+.4f}')
-    print(f'  generated log p / agent-step: {gen:+.4f}')
-    print(f'  gap (generated - logged):     {gen - log:+.4f}')
+    log = mean_of('logged')
+    labels = [('logged', 'real traffic (reference)'),
+              ('generated', 'this generator'),
+              ('permuted', 'own tokens, wrong agents'),
+              ('borrowed', 'another scenario entirely')]
+    print(f'  {"":<26} {"log p / agent-step":>18}  {"vs logged":>10}')
+    for key, label in labels:
+        value = mean_of(key)
+        if value is None:
+            continue
+        delta = '' if key == 'logged' else f'{value - log:+10.4f}'
+        print(f'  {label:<26} {value:>18.4f}  {delta:>10}')
     caveat = report.caveat()
     if caveat:
         print(f'\n  !! {caveat}')
@@ -122,7 +145,7 @@ def main():
                        'judge_ckpt': report.judge_ckpt,
                        'self_judged': report.self_judged,
                        'caveat': caveat,
-                       'mean_logged': log, 'mean_generated': gen,
+                       'means': {k: mean_of(k) for k, _ in labels},
                        'scores': report.scores}, f, indent=2)
         print(f'\nwrote {args.out}')
 

@@ -76,3 +76,46 @@ def test_self_judging_is_allowed_when_asked_for_explicitly():
 def test_a_distinct_judge_is_not_flagged():
     report = RealismReport.create(generator_ckpt=CKPT, judge_ckpt="other.ckpt")
     assert report.self_judged is False
+
+
+# --- anchors: deliberately wrong token sequences, to check the ruler ---
+
+def test_borrowed_tokens_match_the_target_agent_count():
+    """Another scenario has a different number of agents; the donor sequence
+    is tiled or truncated so it can be scored against this scenario."""
+    from smart.safety.scoring import borrow_tokens
+    donor = torch.arange(3 * 16).reshape(3, 16)
+
+    assert borrow_tokens(donor, num_agents=7).shape == (7, 16)
+    assert borrow_tokens(donor, num_agents=2).shape == (2, 16)
+
+
+def test_borrowed_tokens_reuse_the_donor_rows():
+    from smart.safety.scoring import borrow_tokens
+    donor = torch.arange(3 * 16).reshape(3, 16)
+
+    borrowed = borrow_tokens(donor, num_agents=5)
+
+    assert torch.equal(borrowed[0], donor[0])
+    assert torch.equal(borrowed[3], donor[0])   # wraps around
+
+
+def test_permuting_agents_keeps_every_sequence_but_moves_it():
+    """The sharpest anchor: identical token marginals, wrong pairing with map
+    and history. A judge that only learned token frequencies cannot tell this
+    apart from the real thing."""
+    from smart.safety.scoring import permute_agents
+    tokens = torch.arange(6 * 16).reshape(6, 16)
+
+    permuted = permute_agents(tokens, seed=0)
+
+    assert permuted.shape == tokens.shape
+    assert not torch.equal(permuted, tokens)
+    assert torch.equal(permuted.sort(dim=0).values, tokens.sort(dim=0).values)
+
+
+def test_permuting_agents_is_reproducible():
+    from smart.safety.scoring import permute_agents
+    tokens = torch.arange(6 * 16).reshape(6, 16)
+
+    assert torch.equal(permute_agents(tokens, seed=3), permute_agents(tokens, seed=3))

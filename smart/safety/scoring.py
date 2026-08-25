@@ -99,3 +99,54 @@ class RealismReport:
             return ('CIRCULAR: scored by the generating model. Valid for '
                     'checking the pipeline, not as evidence of realism.')
         return None
+
+
+# --- anchors -----------------------------------------------------------------
+#
+# A likelihood is only a useful ruler if it separates plausible scenarios from
+# implausible ones. These build deliberately wrong token sequences to measure
+# that separation. Without them, a small gap between logged and generated
+# scenarios is uninterpretable: it could mean the generator is good, or it
+# could mean the ruler cannot tell anything apart.
+
+
+def borrow_tokens(donor: torch.Tensor, num_agents: int) -> torch.Tensor:
+    """A different scenario's token sequence, resized to this scenario.
+
+    The donor's agents have nothing to do with this scenario's map or history,
+    so this is the "obviously wrong" end of the scale. Rows wrap around when
+    the donor has fewer agents.
+
+    Args:
+        donor: (num_donor_agents, num_steps) sequence from another scenario.
+        num_agents: agent count to match.
+
+    Returns:
+        (num_agents, num_steps) tokens.
+    """
+    rows = torch.arange(num_agents, device=donor.device) % donor.shape[0]
+    return donor[rows].contiguous()
+
+
+def permute_agents(tokens: torch.Tensor, seed: int = 0) -> torch.Tensor:
+    """This scenario's own sequences, reassigned to the wrong agents.
+
+    Sharper than borrowing from elsewhere: the token marginals are untouched,
+    so only a judge that actually conditions on map and history can tell this
+    apart from the real scenario. A judge that merely learned which tokens are
+    common cannot.
+
+    Args:
+        tokens: (num_agents, num_steps).
+        seed: fixes the permutation.
+
+    Returns:
+        (num_agents, num_steps) with rows permuted, never the identity for
+        more than one agent.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    num_agents = tokens.shape[0]
+    order = torch.randperm(num_agents, generator=generator)
+    if num_agents > 1 and bool((order == torch.arange(num_agents)).all()):
+        order = order.roll(1)
+    return tokens[order.to(tokens.device)].contiguous()
