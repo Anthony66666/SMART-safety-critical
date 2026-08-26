@@ -27,6 +27,35 @@ def tilt_weights(weights: torch.Tensor,
     Returns:
         (..., K) tilted weights, unnormalised.
     """
-    # Subtract the row max for numerical stability; it cancels on normalisation.
-    scaled = (danger - danger.amax(dim=-1, keepdim=True)) / beta
-    return weights * torch.exp(scaled)
+    # Reference the max over candidates that can actually be drawn (positive
+    # weight). A top-k restriction may have zeroed the most dangerous token; if
+    # its danger were still the reference, every survivor would underflow to
+    # zero in float32 and multinomial would have nothing to sample.
+    drawable = danger.masked_fill(weights <= 0, float('-inf'))
+    ref = drawable.amax(dim=-1, keepdim=True)
+    # Survivors have danger <= ref so the exponent is <= 0 and cannot overflow.
+    # Zeroed candidates keep danger > ref, which would give 0 * inf = nan, so
+    # they are forced back to zero explicitly.
+    tilted = weights * torch.exp((danger - ref) / beta)
+    return torch.where(weights > 0, tilted, torch.zeros_like(weights))
+
+
+def restrict_to_topk(weights: torch.Tensor, k: int) -> torch.Tensor:
+    """Zero all but the k largest weights along the last dim.
+
+    Full-support sampling reaches low-probability tail tokens that produce
+    physically jerky motion even before any tilt. Restricting the tilt to the
+    model's top-k candidates keeps it on plausible motion while still leaving
+    room to pick the dangerous option among them.
+
+    Args:
+        weights: (..., K) non-negative weights.
+        k: number of candidates to keep.
+
+    Returns:
+        (..., K) weights with all but the top-k zeroed.
+    """
+    if k >= weights.shape[-1]:
+        return weights
+    kth = weights.topk(k, dim=-1).values[..., -1:]
+    return torch.where(weights >= kth, weights, torch.zeros_like(weights))

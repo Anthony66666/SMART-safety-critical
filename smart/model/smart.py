@@ -128,13 +128,14 @@ class SMART(pl.LightningModule):
 
     def inference(self, data: HeteroData, ego_planner=None, forced_tokens=None,
                   temperature: float = 1.0, tilt_beta=None,
-                  adversary_mask=None, victim_index=None):
+                  adversary_mask=None, victim_index=None, tilt_topk=None):
         res = self.encoder.inference(data, ego_planner=ego_planner,
                                      forced_tokens=forced_tokens,
                                      temperature=temperature,
                                      tilt_beta=tilt_beta,
                                      adversary_mask=adversary_mask,
-                                     victim_index=victim_index)
+                                     victim_index=victim_index,
+                                     tilt_topk=tilt_topk)
         return res
 
     def maybe_autocast(self, dtype=torch.float16):

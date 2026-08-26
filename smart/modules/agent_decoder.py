@@ -13,7 +13,7 @@ from smart.safety.likelihood import SequenceLikelihood
 from smart.safety.ego import PlanningContext
 from smart.safety.tokenization import nearest_token
 from smart.safety.objectives import proximity_danger
-from smart.safety.tilting import tilt_weights
+from smart.safety.tilting import tilt_weights, restrict_to_topk
 import math
 
 
@@ -375,7 +375,8 @@ class SMARTAgentDecoder(nn.Module):
                   temperature: float = 1.0,
                   tilt_beta: Optional[float] = None,
                   adversary_mask: Optional[torch.Tensor] = None,
-                  victim_index: Optional[int] = None) -> Dict[str, torch.Tensor]:
+                  victim_index: Optional[int] = None,
+                  tilt_topk: Optional[int] = None) -> Dict[str, torch.Tensor]:
         eval_mask = data['agent']['valid_mask'][:, self.num_historical_steps - 1]
         pos_a = data['agent']['token_pos'].clone()
         head_a = data['agent']['token_heading'].clone()
@@ -515,8 +516,13 @@ class SMARTAgentDecoder(nn.Module):
                     vb = victim_box[None, None, None].expand(
                         adv_geo.shape[0], adv_geo.shape[1], adv_geo.shape[2], 4, 2)
                     danger = proximity_danger(adv_geo, vb)             # (A, beam)
-                    sampling_weights[adv_rows] = tilt_weights(
-                        sampling_weights[adv_rows], danger, tilt_beta)
+                    adv_w = sampling_weights[adv_rows]
+                    if tilt_topk is not None:
+                        # Full support reaches jerky tail tokens; tilt only
+                        # within the model's top-k so the adversary stays on
+                        # plausible motion.
+                        adv_w = restrict_to_topk(adv_w, tilt_topk)
+                    sampling_weights[adv_rows] = tilt_weights(adv_w, danger, tilt_beta)
             sample_index = torch.multinomial(sampling_weights, 1).to(agent_pred_rel.device)
             agent_pred_rel = agent_pred_rel.gather(dim=1,
                                                    index=sample_index[..., None, None, None].expand(-1, -1, 6, 4,

@@ -52,3 +52,38 @@ def test_zero_probability_candidates_stay_zero():
     tilted = tilt_weights(w, danger, beta=0.5)
 
     assert tilted[0, 1].item() == 0.0
+
+
+def test_restrict_to_topk_keeps_only_the_k_largest():
+    from smart.safety.tilting import restrict_to_topk
+    w = torch.tensor([[0.1, 0.5, 0.2, 0.05, 0.15]])
+
+    kept = restrict_to_topk(w, k=2)
+
+    assert kept[0, 1].item() == pytest.approx(0.5)   # largest kept
+    assert kept[0, 2].item() == pytest.approx(0.2)   # 2nd kept
+    assert kept[0, 0].item() == 0.0                  # rest zeroed
+    assert kept[0, 3].item() == 0.0
+    assert kept[0, 4].item() == 0.0
+
+
+def test_restrict_to_topk_is_a_noop_when_k_exceeds_width():
+    from smart.safety.tilting import restrict_to_topk
+    w = torch.tensor([[0.3, 0.7]])
+    assert torch.equal(restrict_to_topk(w, k=10), w)
+
+
+def test_tilt_survives_when_the_max_danger_candidate_is_masked_out():
+    """restrict_to_topk can zero the single most dangerous candidate. The tilt
+    must then normalise against the surviving candidates, not the masked max,
+    or every survivor underflows to zero and multinomial has nothing to draw."""
+    # float32 with a realistic danger gap, as in the rollout: exp underflows
+    # to exactly zero for every survivor if the masked max is the reference.
+    w = torch.tensor([[0.0, 0.5, 0.5]], dtype=torch.float32)
+    danger = torch.tensor([[200.0, 1.0, 0.0]], dtype=torch.float32)
+
+    out = tilt_weights(w, danger, beta=0.1)
+
+    assert torch.isfinite(out).all()
+    assert out.sum().item() > 0
+    assert out[0, 0].item() == 0.0            # masked candidate stays zero
