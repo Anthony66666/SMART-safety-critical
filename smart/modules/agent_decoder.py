@@ -12,6 +12,8 @@ from smart.utils import angle_between_2d_vectors, weight_init, wrap_angle
 from smart.safety.likelihood import SequenceLikelihood
 from smart.safety.ego import PlanningContext
 from smart.safety.tokenization import nearest_token
+from smart.safety.objectives import proximity_danger
+from smart.safety.tilting import tilt_weights
 import math
 
 
@@ -34,6 +36,19 @@ def cal_polygon_contour(x, y, theta, width, length):
     polygon_contour = [left_front, right_front, right_back, left_back]
 
     return polygon_contour
+
+
+def _nominal_box(x, y, theta, length=4.8, width=2.0):
+    """A single (4, 2) vehicle box, corner order lf, rf, rb, lb -- the same
+    convention as cal_polygon_contour and the token vocabulary."""
+    c, s = theta.cos(), theta.sin()
+    hl, hw = length / 2, width / 2
+    return torch.stack([
+        torch.stack([x + hl * c - hw * s, y + hl * s + hw * c]),
+        torch.stack([x + hl * c + hw * s, y + hl * s - hw * c]),
+        torch.stack([x - hl * c + hw * s, y - hl * s - hw * c]),
+        torch.stack([x - hl * c - hw * s, y - hl * s + hw * c]),
+    ])
 
 
 class SMARTAgentDecoder(nn.Module):
@@ -357,7 +372,10 @@ class SMARTAgentDecoder(nn.Module):
                   map_enc: Mapping[str, torch.Tensor],
                   ego_planner=None,
                   forced_tokens: Optional[torch.Tensor] = None,
-                  temperature: float = 1.0) -> Dict[str, torch.Tensor]:
+                  temperature: float = 1.0,
+                  tilt_beta: Optional[float] = None,
+                  adversary_mask: Optional[torch.Tensor] = None,
+                  victim_index: Optional[int] = None) -> Dict[str, torch.Tensor]:
         eval_mask = data['agent']['valid_mask'][:, self.num_historical_steps - 1]
         pos_a = data['agent']['token_pos'].clone()
         head_a = data['agent']['token_heading'].clone()
@@ -483,6 +501,22 @@ class SMARTAgentDecoder(nn.Module):
                                            -1, 2, 2)).view(num_agent, beam, self.shift + 1, 4, 2)
             agent_pred_rel = agent_diff_rel + pos_a[:, (self.num_historical_steps - 1) // self.shift - 1 + t, :][:, None, None, None, ...]
 
+            if tilt_beta is not None and adversary_mask is not None:
+                # agent_pred_rel already holds the exact world geometry of every
+                # candidate (full support), so danger is read straight off it --
+                # no separate geometry pass, no surrogate.
+                cur = (self.num_historical_steps - 1) // self.shift - 1 + t
+                victim_box = _nominal_box(pos_a[victim_index, cur, 0],
+                                          pos_a[victim_index, cur, 1],
+                                          head_a[victim_index, cur]).to(agent_pred_rel.device)
+                adv_rows = adversary_mask.to(agent_pred_rel.device).nonzero().squeeze(-1)
+                if adv_rows.numel() > 0:
+                    adv_geo = agent_pred_rel[adv_rows]                  # (A, beam, T, 4, 2)
+                    vb = victim_box[None, None, None].expand(
+                        adv_geo.shape[0], adv_geo.shape[1], adv_geo.shape[2], 4, 2)
+                    danger = proximity_danger(adv_geo, vb)             # (A, beam)
+                    sampling_weights[adv_rows] = tilt_weights(
+                        sampling_weights[adv_rows], danger, tilt_beta)
             sample_index = torch.multinomial(sampling_weights, 1).to(agent_pred_rel.device)
             agent_pred_rel = agent_pred_rel.gather(dim=1,
                                                    index=sample_index[..., None, None, None].expand(-1, -1, 6, 4,
