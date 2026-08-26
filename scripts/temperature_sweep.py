@@ -9,6 +9,33 @@ verdict on what came out.
 If realism does not track temperature monotonically, a beta-tilted sampler has
 no reason to behave either.
 
+Measured on 60 WOMD validation scenarios, self-judged, full support, against a
+real-traffic reference of -2.511 log p / agent-step:
+
+      T     mean      min    gap vs real
+    0.50   -1.322   -4.099      +1.189
+    0.75   -1.708   -4.892      +0.804
+    1.00   -3.782   -6.516      -1.271
+    1.25   -6.163   -7.695      -3.652
+    1.50   -7.125   -8.203      -4.614
+    3.00   -8.305   -9.043      -5.793
+    5.00   -8.559   -9.252      -6.047
+
+Monotone in the mean in 60 of 60 scenarios individually, not merely on
+average. The lower tail is monotone in 43 of 60, being an extreme-value
+statistic. Every scenario has a temperature at which its generated scenarios
+are exactly as likely as the logged one: median 0.841, IQR [0.802, 0.893]. The
+spread is tight enough to read as a property of the model rather than of any
+scenario, so it is a principled origin for the frontier -- and it says the
+generator at its default T=1 samples scenarios measurably less likely than
+real traffic.
+
+Temperature perturbs every agent and every step at once, which is why the
+response is this clean. A danger-tilted sampler reweights globally but
+concentrates its effect near the ego, so it sits between this and the
+single-agent probe in perturbation_response.py, where only 4 of 60 curves were
+monotone.
+
     python scripts/temperature_sweep.py --num_scenarios 40 --allow_self_judge
 """
 import argparse
