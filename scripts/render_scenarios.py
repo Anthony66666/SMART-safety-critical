@@ -100,6 +100,8 @@ def main():
     parser.add_argument('--generator_ckpt', type=str, default='checkpoints/epoch=31.ckpt')
     parser.add_argument('--data_dir', type=str, default=None)
     parser.add_argument('--beta', type=float, default=0.1)
+    parser.add_argument('--tilt_topk', type=int, default=None,
+                        help='restrict tilt to top-k for plausible motion')
     parser.add_argument('--scan', type=int, default=30, help='scenarios to search')
     parser.add_argument('--render', type=int, default=3, help='best to render')
     parser.add_argument('--device', type=str, default='cuda')
@@ -140,7 +142,8 @@ def main():
             off = model.inference(data, tilt_beta=1e9, adversary_mask=mask, victim_index=victim)
         torch.manual_seed(args.seed + i)
         with torch.no_grad():
-            on = model.inference(data, tilt_beta=args.beta, adversary_mask=mask, victim_index=victim)
+            on = model.inference(data, tilt_beta=args.beta, adversary_mask=mask,
+                                 victim_index=victim, tilt_topk=args.tilt_topk)
 
         _, d_off = closest_step(off, adv, victim)
         _, d_on = closest_step(on, adv, victim)
@@ -149,7 +152,8 @@ def main():
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 6))
         draw_panel(axes[0], data, off, adv, victim, 'tilting off (beta = inf)')
-        draw_panel(axes[1], data, on, adv, victim, f'tilted (beta = {args.beta})')
+        ttl = f'tilted (beta={args.beta}' + (f', top-{args.tilt_topk})' if args.tilt_topk else ')')
+        draw_panel(axes[1], data, on, adv, victim, ttl)
         sid = str(data['scenario_id'][0])
         fig.suptitle(f'scenario {sid[:12]}   adversary log p/step: '
                      f'{float(off["log_p"][adv])/16:.2f} -> {float(on["log_p"][adv])/16:.2f}',
