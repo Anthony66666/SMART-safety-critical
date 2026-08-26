@@ -154,3 +154,47 @@ def test_typicality_grows_in_both_directions():
 
     assert typicality(-2.0, 3.0) == pytest.approx(1.0)
     assert typicality(-4.0, 3.0) == pytest.approx(1.0)
+
+
+# --- single-agent perturbation ----------------------------------------------
+
+def test_zero_offset_leaves_positions_untouched():
+    from smart.safety.scoring import lateral_offset
+    pos = torch.tensor([[[0.0, 0.0], [1.0, 0.0]], [[5.0, 5.0], [6.0, 5.0]]])
+    head = torch.zeros(2, 2)
+
+    assert torch.equal(lateral_offset(pos, head, agent_index=0, distance=0.0), pos)
+
+
+def test_offset_moves_the_agent_perpendicular_to_its_heading():
+    """Heading +x means the lateral direction is +y."""
+    from smart.safety.scoring import lateral_offset
+    pos = torch.tensor([[[0.0, 0.0], [1.0, 0.0]]])
+    head = torch.zeros(1, 2)
+
+    moved = lateral_offset(pos, head, agent_index=0, distance=3.0)
+
+    assert torch.allclose(moved[0, :, 1], torch.full((2,), 3.0))
+    assert torch.allclose(moved[0, :, 0], pos[0, :, 0])
+
+
+def test_offset_leaves_other_agents_alone():
+    from smart.safety.scoring import lateral_offset
+    pos = torch.tensor([[[0.0, 0.0]], [[5.0, 5.0]]])
+    head = torch.zeros(2, 1)
+
+    moved = lateral_offset(pos, head, agent_index=0, distance=3.0)
+
+    assert torch.equal(moved[1], pos[1])
+
+
+def test_offset_preserves_relative_motion():
+    """The point of the probe: the agent's own motion -- and therefore its
+    token sequence -- is unchanged. Only its place in the world moves."""
+    from smart.safety.scoring import lateral_offset
+    pos = torch.tensor([[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]])
+    head = torch.zeros(1, 3)
+
+    moved = lateral_offset(pos, head, agent_index=0, distance=4.0)
+
+    assert torch.allclose(moved[0, 1:] - moved[0, :-1], pos[0, 1:] - pos[0, :-1])

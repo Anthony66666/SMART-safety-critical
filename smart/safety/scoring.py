@@ -197,3 +197,32 @@ def typicality(log_p_per_dim: float, reference_entropy: float) -> float:
     separates generated scenarios from scrambled ones (t=-1.61).
     """
     return abs(-log_p_per_dim - reference_entropy)
+
+
+def lateral_offset(positions: torch.Tensor,
+                   headings: torch.Tensor,
+                   agent_index: int,
+                   distance: float) -> torch.Tensor:
+    """Slide one agent sideways, leaving its motion intact.
+
+    Tokens encode relative motion, so translating an agent perpendicular to
+    its heading leaves its token sequence unchanged -- it simply drives the
+    same way a few metres to the side, off its lane and eventually off the
+    road. That isolates context violation from motion implausibility: any
+    drop in likelihood has to come from where the agent now is, not from what
+    it is doing.
+
+    Args:
+        positions: (num_agents, num_steps, 2).
+        headings: (num_agents, num_steps).
+        agent_index: which agent to move.
+        distance: metres to displace, along the agent's left-hand normal.
+
+    Returns:
+        A new (num_agents, num_steps, 2) tensor; other agents are untouched.
+    """
+    moved = positions.clone()
+    heading = headings[agent_index]
+    normal = torch.stack([-heading.sin(), heading.cos()], dim=-1)
+    moved[agent_index] = positions[agent_index] + distance * normal
+    return moved

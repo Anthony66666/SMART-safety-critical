@@ -31,11 +31,11 @@ from smart.utils.config import load_config_act
 from smart.utils.log import Logging
 
 
-def load_model(config, ckpt):
+def load_model(config, ckpt, device='cuda'):
     model = SMART(config.Model)
     model.load_params_from_file(filename=ckpt, logger=Logging().log(level='DEBUG'))
     model.eval()
-    return model
+    return model.to(device)
 
 
 def mean_per_step(log_p, eval_mask, num_steps):
@@ -78,6 +78,7 @@ def main():
                         help='override sampling truncation; 0 keeps the config value')
     parser.add_argument('--num_workers', type=int, default=8,
                         help='dataloader workers; preprocessing dominates runtime')
+    parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--out', type=str, default='')
     args = parser.parse_args()
@@ -108,8 +109,8 @@ def main():
                                                         config.Model.decoder.num_future_steps),
                            scenario_ids=scenario_ids)
 
-    generator = load_model(config, args.generator_ckpt)
-    judge = generator if report.self_judged else load_model(config, judge_ckpt)
+    generator = load_model(config, args.generator_ckpt, args.device)
+    judge = generator if report.self_judged else load_model(config, judge_ckpt, args.device)
 
     hist = config.Model.num_historical_steps
     shift = 5
@@ -124,7 +125,7 @@ def main():
             break
         # One prepared scenario for both models: preparing separately would
         # give them different map context and incomparable likelihoods.
-        data = prepare_scenario(generator, batch, seed=args.seed)
+        data = prepare_scenario(generator, batch.to(args.device), seed=args.seed)
         eval_mask = data['agent']['valid_mask'][:, hist - 1]
 
         torch.manual_seed(args.seed + i)
