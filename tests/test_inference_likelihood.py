@@ -17,7 +17,14 @@ CONFIG = "configs/validation/validation_scalable.yaml"
 CKPT = "checkpoints/epoch=31.ckpt"
 
 
-def _load(beam_size=None):
+def _load(beam_size=None, seed=0):
+    """A model and one prepared scenario, reproducibly.
+
+    sample_pt_pred randomly masks map points -- a training augmentation -- so
+    without a fixed seed two loads hand the model different map context and
+    nothing downstream is comparable.
+    """
+    torch.manual_seed(seed)
     config = load_config_act(CONFIG)
     if beam_size is not None:
         config.Model.decoder.beam_size = beam_size

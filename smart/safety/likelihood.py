@@ -24,18 +24,23 @@ class SequenceLikelihood:
 
     def update(self,
                p_chosen: torch.Tensor,
-               topk_sum: torch.Tensor,
+               q_chosen: torch.Tensor,
                valid: torch.Tensor) -> None:
         """Fold in one rollout step.
 
+        q is passed in rather than derived from p: top-k truncation happens to
+        make q a renormalisation of p, but temperature, tilting and guidance do
+        not, and inferring q would silently corrupt every importance weight
+        the moment the sampler stops being plain truncation.
+
         Args:
             p_chosen: (num_agents,) model probability of the sampled token.
-            topk_sum: (num_agents,) sum of the top-k probabilities.
+            q_chosen: (num_agents,) probability the sampler actually used.
             valid: (num_agents,) bool; invalid agents contribute nothing.
         """
         zero = torch.zeros_like(p_chosen)
         step_log_p = torch.log(p_chosen)
-        step_log_q = step_log_p - torch.log(topk_sum)
+        step_log_q = torch.log(q_chosen)
         self._log_p = self._log_p + torch.where(valid, step_log_p, zero)
         self._log_q = self._log_q + torch.where(valid, step_log_q, zero)
 

@@ -356,7 +356,8 @@ class SMARTAgentDecoder(nn.Module):
                   data: HeteroData,
                   map_enc: Mapping[str, torch.Tensor],
                   ego_planner=None,
-                  forced_tokens: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                  forced_tokens: Optional[torch.Tensor] = None,
+                  temperature: float = 1.0) -> Dict[str, torch.Tensor]:
         eval_mask = data['agent']['valid_mask'][:, self.num_historical_steps - 1]
         pos_a = data['agent']['token_pos'].clone()
         head_a = data['agent']['token_heading'].clone()
@@ -454,8 +455,17 @@ class SMARTAgentDecoder(nn.Module):
                 # bookkeeping below need no special case.
                 next_token_idx = forced_tokens[:, t:t + 1].to(next_token_prob_softmax.device)
                 topk_prob = next_token_prob_softmax.gather(dim=-1, index=next_token_idx)
+                sampling_weights = topk_prob
             else:
-                topk_prob, next_token_idx = torch.topk(next_token_prob_softmax, k=self.beam_size, dim=-1)
+                # Temperature reshapes only what gets sampled. p stays the
+                # model's own T=1 verdict on whatever came out, which is what
+                # makes the sample's likelihood a measurement rather than a
+                # restatement of the sampler.
+                source = (next_token_prob_softmax if temperature == 1.0 else
+                          torch.softmax(next_token_prob / temperature, dim=-1))
+                _, next_token_idx = torch.topk(source, k=self.beam_size, dim=-1)
+                topk_prob = next_token_prob_softmax.gather(dim=-1, index=next_token_idx)
+                sampling_weights = source.gather(dim=-1, index=next_token_idx)
             beam = next_token_idx.shape[-1]
 
             expanded_index = next_token_idx[..., None, None, None].expand(-1, -1, 6, 4, 2)
@@ -473,7 +483,7 @@ class SMARTAgentDecoder(nn.Module):
                                            -1, 2, 2)).view(num_agent, beam, self.shift + 1, 4, 2)
             agent_pred_rel = agent_diff_rel + pos_a[:, (self.num_historical_steps - 1) // self.shift - 1 + t, :][:, None, None, None, ...]
 
-            sample_index = torch.multinomial(topk_prob, 1).to(agent_pred_rel.device)
+            sample_index = torch.multinomial(sampling_weights, 1).to(agent_pred_rel.device)
             agent_pred_rel = agent_pred_rel.gather(dim=1,
                                                    index=sample_index[..., None, None, None].expand(-1, -1, 6, 4,
                                                                                                     2))[:, 0, ...]
@@ -481,8 +491,10 @@ class SMARTAgentDecoder(nn.Module):
             # topk_prob comes from the full softmax and is NOT renormalised, so it
             # is the exact model probability p. The sampling distribution q is that
             # same mass renormalised over the top-k, hence topk_prob.sum(-1).
+            q_chosen = (sampling_weights.gather(dim=-1, index=sample_index)[:, 0]
+                        / sampling_weights.sum(dim=-1))
             likelihood.update(p_chosen=pred_prob[:, t],
-                              topk_sum=topk_prob.sum(dim=-1),
+                              q_chosen=q_chosen,
                               valid=likelihood_mask)
             pred_traj[:, t * 5:(t + 1) * 5] = agent_pred_rel[:, 1:, ...].clone().mean(dim=2)
             diff_xy = agent_pred_rel[:, 1:, 0, :] - agent_pred_rel[:, 1:, 3, :]

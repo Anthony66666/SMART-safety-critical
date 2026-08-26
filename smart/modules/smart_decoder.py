@@ -67,10 +67,11 @@ class SMARTDecoder(nn.Module):
         return {**map_enc, **agent_enc}
 
     def inference(self, data: HeteroData, ego_planner=None,
-                  forced_tokens=None) -> Dict[str, torch.Tensor]:
+                  forced_tokens=None, temperature: float = 1.0) -> Dict[str, torch.Tensor]:
         map_enc = self.map_encoder(data)
         agent_enc = self.agent_encoder.inference(data, map_enc, ego_planner=ego_planner,
-                                                 forced_tokens=forced_tokens)
+                                                 forced_tokens=forced_tokens,
+                                                 temperature=temperature)
         return {**map_enc, **agent_enc}
 
     def inference_no_map(self, data: HeteroData, map_enc) -> Dict[str, torch.Tensor]:
