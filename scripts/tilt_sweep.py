@@ -9,6 +9,30 @@ victim and the realism cost it pays (the model's own log p of the adversary
 trajectory -- tilting does not change that accounting).
 
     python scripts/tilt_sweep.py --num_scenarios 40 --allow_self_judge
+
+Result on 60 WOMD validation scenarios, self-judged, full support (mean curve):
+
+      beta   danger (m)   adv log p/step   collisions
+       off       -4.015           -3.728      5/60
+      5.00       -3.676           -3.828      6/60
+      2.00       -3.158           -3.994     12/60
+      1.00       -2.690           -4.135     15/60
+      0.50       -2.262           -4.208     18/60
+      0.25       -0.745           -4.297     32/60
+      0.10       -0.344           -4.493     37/60
+
+The mean frontier is monotone in both axes at all seven points: danger rises
+from -4.0 m to contact while adversary realism falls only ~0.77 nats. Tilting
+drives the collision rate from 8% to 62% for under one nat of the adversary's
+own log p -- for contrast the temperature sweep gave up 4+ nats to move realism
+a comparable amount, because it degraded the whole scene rather than one agent.
+That gap is the structural advantage: danger bought cheaply by reweighting a
+single agent on the token manifold.
+
+Per scenario the response is noisy, as anticipated for a concentrated tilt:
+danger is fully monotone in only 30/60, realism in 9/60 (against 60/60 for the
+global temperature knob). A frontier point must therefore average over
+scenarios -- which is how the curve above is built.
 """
 import argparse
 import json
