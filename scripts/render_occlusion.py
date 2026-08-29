@@ -99,10 +99,13 @@ def draw_scene(ax, scenario, timestep, radius=55.0, occluder_types=(VEHICLE,)):
     corners = boxes_to_corners(boxes[:, 0], boxes[:, 1], boxes[:, 2],
                                boxes[:, 3], boxes[:, 4])
 
-    map_xy = scenario['map_point']['position'][:, :2]
-    near_map = (map_xy - origin).norm(dim=-1) <= radius
-    ax.scatter(map_xy[near_map, 0], map_xy[near_map, 1],
-               s=0.25, c='#c8c8c8', linewidths=0, zorder=0)
+    # nuPlan fixtures carry no road geometry -- the maps are a separate, large
+    # download -- so the scene is still worth drawing without it.
+    if 'map_point' in scenario:
+        map_xy = scenario['map_point']['position'][:, :2]
+        near_map = (map_xy - origin).norm(dim=-1) <= radius
+        ax.scatter(map_xy[near_map, 0], map_xy[near_map, 1],
+                   s=0.25, c='#c8c8c8', linewidths=0, zorder=0)
 
     for i in torch.nonzero(is_occluder, as_tuple=True)[0].tolist():
         ax.add_patch(Polygon(shadow_polygon(origin, corners[i], radius * 2.2),

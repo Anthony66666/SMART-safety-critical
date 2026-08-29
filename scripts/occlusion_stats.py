@@ -32,7 +32,7 @@ VEHICLE = 0
 WOMD_DT = 0.1
 
 
-def scenario_stats(scenario, bands, radius, buffer):
+def scenario_stats(scenario, bands, radius, buffer, targets):
     """Accumulate per-band counts over every timestep of one scenario."""
     agent = scenario['agent']
     av_index = agent['av_index']
@@ -68,7 +68,7 @@ def scenario_stats(scenario, bands, radius, buffer):
         remembered_ids = {e.track_id for e in buffer.update(t * WOMD_DT, seen)}
 
         for j in range(len(keep)):
-            if j == ego_row:
+            if j == ego_row or int(agent['type'][keep[j]]) not in targets:
                 continue
             d = float(distance[keep[j]])
             band = next((b for b in bands if b[0] <= d < b[1]), None)
@@ -87,7 +87,14 @@ def main():
     parser.add_argument('--data-dir', default='data/valid_demo')
     parser.add_argument('--radius', type=float, default=55.0)
     parser.add_argument('--memory-horizon', type=float, default=3.0)
+    parser.add_argument('--targets', default='0,1,2',
+                        help='type ids counted as targets; defaults to vehicle, '
+                             'pedestrian and bicycle, which share these ids in '
+                             'WOMD and nuPlan. nuPlan also tracks 0.4 m roadside '
+                             'debris as generic_object, and occluding a piece of '
+                             'debris is not a fact about a planner.')
     args = parser.parse_args()
+    targets = {int(t) for t in args.targets.split(',')}
 
     bands = [(0, 10), (10, 20), (20, 30), (30, 40), (40, args.radius)]
     totals = {b: [0, 0, 0, 0, 0] for b in bands}
@@ -99,11 +106,13 @@ def main():
     for path in paths:
         with open(path, 'rb') as f:
             scenario = pickle.load(f)
-        for band, row in scenario_stats(scenario, bands, args.radius, buffer).items():
+        for band, row in scenario_stats(scenario, bands, args.radius,
+                                        buffer, targets).items():
             totals[band] = [a + b for a, b in zip(totals[band], row)]
 
     print(f'{len(paths)} scenarios, radius {args.radius:g} m, '
-          f'memory horizon {args.memory_horizon:g} s\n')
+          f'memory horizon {args.memory_horizon:g} s, '
+          f'target types {sorted(targets)}\n')
     header = f"{'band (m)':>10} {'hidden':>8} {'partial':>8} {'visible':>8} " \
              f"{'hidden%':>8} {'remembered':>11} {'unknown':>8} {'unknown%':>9}"
     print(header)
