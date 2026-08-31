@@ -41,11 +41,27 @@ $PIP install -q --timeout 60 --retries 6 -r "$WORK/Flow-Planner/requirements.txt
 $PIP install -q --timeout 60 --retries 6 "pytorch-lightning>=2.0,<2.5"
 
 echo "=== 5. checkpoint ==="
+# huggingface.co is unreachable from this box; hf-mirror.com serves the same
+# paths and does answer. Both are tried, and a failure stops the script rather
+# than leaving an empty directory for a later step to trip over.
 mkdir -p "$WORK/checkpoints"
+HOSTS="${HF_HOSTS:-https://hf-mirror.com https://huggingface.co}"
 for f in model_config.yaml model.pth; do
-    [ -s "$WORK/checkpoints/$f" ] || \
-        curl -sL -o "$WORK/checkpoints/$f" \
-        "https://huggingface.co/ttwhy/flow-planner/resolve/main/$f"
+    [ -s "$WORK/checkpoints/$f" ] && { echo "  have $f"; continue; }
+    for host in $HOSTS; do
+        echo "  fetching $f from $host"
+        if curl -fL --connect-timeout 20 --retry 3 -o "$WORK/checkpoints/$f" \
+                "$host/ttwhy/flow-planner/resolve/main/$f"; then
+            break
+        fi
+        rm -f "$WORK/checkpoints/$f"
+    done
+    if [ ! -s "$WORK/checkpoints/$f" ]; then
+        echo "FAILED to download $f from any of: $HOSTS" >&2
+        echo "Copy it in by hand, then re-run this script:" >&2
+        echo "  scp checkpoints/flow_planner/$f <this-host>:$WORK/checkpoints/" >&2
+        exit 1
+    fi
 done
 ls -la "$WORK/checkpoints"
 
