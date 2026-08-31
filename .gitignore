@@ -138,3 +138,5 @@ gathered*
 # nuPlan logs and fixtures derived from them: licensed data, not ours to
 # redistribute. scripts/extract_nuplan_fixture.py regenerates them from a log.
 data/nuplan_mini/
+
+data/nuplan_converted/

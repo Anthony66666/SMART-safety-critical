@@ -60,7 +60,12 @@ def open_scenario(db_path, data_root, map_root, duration):
     connection = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
     token, timestamp = connection.execute(
         'select token, timestamp from lidar_pc order by timestamp limit 1').fetchone()
-    location = connection.execute('select location from log').fetchone()[0]
+    # `location` is a loose label -- Las Vegas logs carry "las_vegas", which no
+    # map is filed under. `map_version` holds the real map name. The two agree
+    # in Pittsburgh and Boston, so using the wrong one stays invisible until
+    # something actually loads the map.
+    location, map_name = connection.execute(
+        'select location, map_version from log').fetchone()
     connection.close()
 
     return NuPlanScenario(
@@ -71,7 +76,7 @@ def open_scenario(db_path, data_root, map_root, duration):
         scenario_type='unknown',
         map_root=map_root,
         map_version='nuplan-maps-v1.0',
-        map_name=location,
+        map_name=map_name,
         scenario_extraction_info=ScenarioExtractionInfo(
             scenario_name='occlusion_check', scenario_duration=duration,
             extraction_offset=0.0, subsample_ratio=1.0),
