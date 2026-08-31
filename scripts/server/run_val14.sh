@@ -83,10 +83,19 @@ THREADS=${THREADS:-48}
 
 # LIMIT caps the scenario count, for a smoke test. Unset means the whole split.
 LIMIT_ARG=""
+WORKER=${WORKER:-ray_distributed}
 if [ -n "${LIMIT:-}" ]; then
     LIMIT_ARG="scenario_filter.limit_total_scenarios=$LIMIT"
-    echo "SMOKE TEST: $LIMIT scenarios only"
+    # Ray swallows worker tracebacks: a smoke test that fails under it shows up
+    # as a progress bar that never moves, which says nothing about why. Run the
+    # small case in-process so the error is the error. Set WORKER to override.
+    WORKER=${WORKER_OVERRIDE:-sequential}
+    echo "SMOKE TEST: $LIMIT scenarios, worker=$WORKER"
 fi
+
+# threads_per_node is a ray option; passing it to the sequential worker fails.
+THREADS_ARG=""
+[ "$WORKER" = "ray_distributed" ] && THREADS_ARG="worker.threads_per_node=$THREADS"
 
 if [ "$MODE" = "occluded" ]; then
     OBSERVATION="observation=occluded_box_observation"
@@ -117,9 +126,9 @@ $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     scenario_filter=val14 \
     $LIMIT_ARG \
     experiment_uid="flow_planner/val14/$TAG/$(date +%Y-%m-%d-%H-%M-%S)" \
-    worker=ray_distributed \
-    worker.threads_per_node=$THREADS \
+    worker=$WORKER \
     distributed_mode=SINGLE_NODE \
+    $THREADS_ARG \
     number_of_gpus_allocated_per_simulation=$GPU_FRACTION \
     enable_simulation_progress_bar=true \
     verbose=false \
