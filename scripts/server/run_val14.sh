@@ -6,8 +6,13 @@
 # non-reactive; if this run does not land near that, the harness is wrong and
 # the occluded number means nothing. Run the baseline first and look at it.
 #
+#   LIMIT=8 bash scripts/server/run_val14.sh baseline   # smoke test first
 #   bash scripts/server/run_val14.sh baseline
 #   bash scripts/server/run_val14.sh occluded
+#
+# Run the smoke test before committing to the full split. Eight scenarios take
+# minutes and catch a broken path, a missing map or a planner that will not
+# load; 1118 take hours to tell you the same thing.
 #
 # 1118 scenarios, 15 s each, both conditions. Everything except the observation
 # is nuPlan's own: two_stage_controller, the official closed-loop metrics and
@@ -41,6 +46,13 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 GPU_FRACTION=${GPU_FRACTION:-0.1}
 THREADS=${THREADS:-48}
 
+# LIMIT caps the scenario count, for a smoke test. Unset means the whole split.
+LIMIT_ARG=""
+if [ -n "${LIMIT:-}" ]; then
+    LIMIT_ARG="scenario_filter.limit_total_scenarios=$LIMIT"
+    echo "SMOKE TEST: $LIMIT scenarios only"
+fi
+
 if [ "$MODE" = "occluded" ]; then
     OBSERVATION="observation=occluded_box_observation"
     TAG=occluded
@@ -61,6 +73,7 @@ $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     scenario_builder=nuplan \
     scenario_builder.data_root="$NUPLAN_DATA_ROOT/nuplan-v1.1/splits/val" \
     scenario_filter=val14 \
+    $LIMIT_ARG \
     experiment_uid="flow_planner/val14/$TAG/$(date +%Y-%m-%d-%H-%M-%S)" \
     worker=ray_distributed \
     worker.threads_per_node=$THREADS \
