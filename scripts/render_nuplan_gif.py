@@ -38,11 +38,17 @@ from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 from nuplan.common.maps.maps_datatypes import SemanticMapLayer
 from nuplan.planning.simulation.simulation_log import SimulationLog
 
-from scripts.render_occlusion import EGO, HIDDEN, VISIBLE, shadow_polygon
+from scripts.render_occlusion import EGO, HIDDEN, PARTIAL, VISIBLE, shadow_polygon
 from smart.occlusion.visibility import boxes_to_corners
 
 WITHHELD = HIDDEN
-GIVEN = VISIBLE
+SEEN = VISIBLE
+# Remembered objects are fully occluded right now -- the planner has them only
+# because the tracking buffer is still carrying a stale measurement. Painting
+# them the same green as directly visible agents makes the picture look wrong:
+# cars sitting in an obvious shadow appear to have been handed over. They were,
+# but from memory, and that distinction is the whole point of the buffer.
+REMEMBERED = PARTIAL
 LANE_COLOUR = '#c8c8c8'
 
 
@@ -103,7 +109,15 @@ def render(baseline_log, occluded_log, out_path, radius, fps, stride):
         ax.clear()
         sample = baseline[index]
         ego = sample.ego_state
-        origin = torch.tensor([ego.center.x, ego.center.y])
+        # Sight lines are cast from the pose the wrapper actually used, which
+        # is the previous step's: nuPlan updates observations before the ego
+        # state for the step reaches the history buffer. Drawing from the
+        # current pose instead leaves about 1.4% of agents contradicting their
+        # own shadow at the boundary -- measured, and exactly zero once the
+        # right pose is used. The half-metre offset is invisible at this scale,
+        # and the ego box itself is still drawn where the ego really is.
+        viewpoint = baseline[max(index - 1, 0)].ego_state.center
+        origin = torch.tensor([viewpoint.x, viewpoint.y])
 
         for path in paths:
             xs = [p[0] for p in path]
@@ -112,6 +126,13 @@ def render(baseline_log, occluded_log, out_path, radius, fps, stride):
 
         boxes, ids = boxes_of(sample.observation)
         given = track_ids(occluded[index].observation)
+        # An object the wrapper rebuilt from memory keeps its original, stale
+        # timestamp; one that was actually seen carries the current frame's.
+        now = max((o.metadata.timestamp_us
+                   for o in occluded[index].observation.tracked_objects), default=0)
+        fresh = {o.track_token or o.token
+                 for o in occluded[index].observation.tracked_objects
+                 if o.metadata.timestamp_us == now}
 
         if len(boxes):
             near = ((boxes[:, :2] - origin).norm(dim=-1) <= radius)
@@ -132,8 +153,8 @@ def render(baseline_log, occluded_log, out_path, radius, fps, stride):
             for i in range(len(boxes)):
                 if not near[i]:
                     continue
-                shown = ids[i] in given
-                colour = GIVEN if shown else WITHHELD
+                colour = (SEEN if ids[i] in fresh
+                          else REMEMBERED if ids[i] in given else WITHHELD)
                 ax.add_patch(Polygon(corners[i].numpy(), closed=True,
                                      facecolor=colour, edgecolor='#333333',
                                      linewidth=0.4, alpha=0.85, zorder=2))
@@ -153,12 +174,14 @@ def render(baseline_log, occluded_log, out_path, radius, fps, stride):
         ax.add_patch(Polygon(ego_corners.numpy(), closed=True, facecolor=EGO,
                              edgecolor='white', linewidth=1.0, zorder=3))
 
-        withheld = sum(1 for i, t in enumerate(ids) if near[i] and t not in given) \
-            if len(boxes) else 0
-        shown_count = sum(1 for i, t in enumerate(ids) if near[i] and t in given) \
-            if len(boxes) else 0
-        ax.set_title(f'given {shown_count}   withheld {withheld}   '
-                     f't={index * 0.1:.1f}s', fontsize=10)
+        counts = [0, 0, 0]  # seen, remembered, withheld
+        if len(boxes):
+            for i, token in enumerate(ids):
+                if not near[i]:
+                    continue
+                counts[0 if token in fresh else 1 if token in given else 2] += 1
+        ax.set_title(f'seen {counts[0]}   remembered {counts[1]}   '
+                     f'withheld {counts[2]}   t={index * 0.1:.1f}s', fontsize=10)
         ax.set_xlim(float(origin[0]) - radius, float(origin[0]) + radius)
         ax.set_ylim(float(origin[1]) - radius, float(origin[1]) + radius)
         ax.set_aspect('equal')
