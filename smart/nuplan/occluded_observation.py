@@ -206,3 +206,24 @@ class OccludedObservation(AbstractObservation):
         if isinstance(original, StaticObject):
             return StaticObject(original.tracked_object_type, box, original.metadata)
         return SceneObject(original.tracked_object_type, box, original.metadata)
+
+
+def build_occluded_observation(observation, scenario, **kwargs):
+    """Hydra entry point for nuPlan's own simulation runner.
+
+    nuPlan builds observations with `instantiate(cfg, scenario=scenario)`, so
+    the scenario arrives as a keyword and any nested observation in the config
+    never receives one. Rather than teach OccludedObservation about hydra, this
+    factory instantiates the wrapped observation with the scenario and hands
+    both to the wrapper. Configure it with `_recursive_: false` so the inner
+    node arrives here as config rather than as a half-built object.
+
+    Args:
+        observation: config of the observation to wrap, e.g. TracksObservation.
+        scenario: injected by nuPlan's observation builder.
+        **kwargs: passed to OccludedObservation.
+    """
+    from hydra.utils import instantiate
+
+    wrapped = instantiate(observation, scenario=scenario)
+    return OccludedObservation(wrapped, scenario, **kwargs)

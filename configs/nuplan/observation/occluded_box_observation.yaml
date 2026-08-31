@@ -1,0 +1,19 @@
+# Log-replay tracks, filtered to what the ego can actually see.
+#
+# Drop-in replacement for nuPlan's own box_observation. Everything else in the
+# simulation -- planner, controller, metrics, scenario filter -- stays exactly
+# as the devkit configures it, so a run under this observation is comparable
+# with a run under box_observation and with published nuPlan numbers.
+_target_: smart.nuplan.occluded_observation.build_occluded_observation
+_convert_: 'all'
+# The wrapped observation must reach the factory as config, not as an object:
+# it needs the scenario, which only the factory has.
+_recursive_: false
+
+observation:
+  _target_: nuplan.planning.simulation.observation.tracks_observation.TracksObservation
+  _convert_: 'all'
+
+# Seconds an occluded track survives in memory. This is the one free parameter
+# in the occlusion stack and has to be reported with any result.
+memory_horizon: 3.0
