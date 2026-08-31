@@ -175,6 +175,18 @@ class OccludedObservation(AbstractObservation):
                 width=float(boxes[i, 3]), length=float(boxes[i, 4])))
 
         estimates = self._buffer.update(self._time_s, seen)
+
+        # Memory may only bridge an occlusion gap, never a detection-range one.
+        # The underlying observation drops an object once it leaves the scene,
+        # and a buffer cannot tell that apart from the object being hidden -- so
+        # left alone it hands the planner ghosts, and the occluded condition
+        # ends up with *more* information than the fully observable one it is
+        # being compared against. Restricting the output to objects the base
+        # observation still reports keeps it a strict subset, which is the
+        # invariant the whole comparison rests on.
+        present = {_track_id(o) for o in objects}
+        estimates = [e for e in estimates if e.track_id in present]
+
         believed = []
         for estimate in estimates:
             original = self._last_seen[estimate.track_id]

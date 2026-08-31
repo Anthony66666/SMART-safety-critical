@@ -55,11 +55,17 @@ def densest_log(data_root):
     return best[1], best[0]
 
 
-def open_scenario(db_path, data_root, map_root, duration):
-    """Build a NuPlanScenario starting at the log's first lidar frame."""
+def open_scenario(db_path, data_root, map_root, duration, start=0):
+    """Build a NuPlanScenario starting `start` lidar frames into the log.
+
+    A closed-loop Simulation preloads a couple of seconds of history before it
+    will step, so a scenario anchored at the log's very first frame has nothing
+    to fill that buffer with and the devkit refuses to run it.
+    """
     connection = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
     token, timestamp = connection.execute(
-        'select token, timestamp from lidar_pc order by timestamp limit 1').fetchone()
+        'select token, timestamp from lidar_pc order by timestamp limit 1 offset ?',
+        (start,)).fetchone()
     # `location` is a loose label -- Las Vegas logs carry "las_vegas", which no
     # map is filed under. `map_version` holds the real map name. The two agree
     # in Pittsburgh and Boston, so using the wrong one stays invisible until

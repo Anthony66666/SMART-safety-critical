@@ -164,3 +164,42 @@ def test_reset_clears_memory_and_requires_reinitialisation():
 def test_initialize_forwards_to_the_wrapped_observation():
     wrapped, _ = make([agent('a', 10.0, 20.0)])
     assert wrapped.initialized
+
+
+def test_memory_never_outlives_the_underlying_observation():
+    """The occluded view must stay a subset of the fully observable one.
+
+    A buffer cannot tell an occluded object from one the underlying observation
+    has stopped reporting -- an object that left sensor range, or the log's
+    detection set. Bridging the second kind hands the planner a ghost, and the
+    occluded condition then carries information the full-observability baseline
+    it is compared against does not have, which inverts the whole experiment.
+    """
+    near = agent('near', 10.0, 0.0)
+    leaving = agent('leaving', 10.0, 20.0)
+    wrapped, occluded = make([near, leaving], memory_horizon=5.0)
+
+    # Both in clear view to begin with, so both are genuinely observed.
+    assert ids(occluded.get_observation()) == ['leaving', 'near']
+
+    # The underlying observation stops reporting one -- it drove out of range,
+    # not behind something. Memory must drop it too, well inside the horizon.
+    wrapped.objects = [near]
+    step(occluded, 0.1, ego_at(0.0, 0.0, 0.1))
+    assert ids(occluded.get_observation()) == ['near']
+
+
+def test_output_is_always_a_subset_of_the_input():
+    blocker = agent('blocker', 10.0, 0.0)
+    hidden = agent('hidden', 20.0, 0.0)
+    other = agent('other', -10.0, 0.0)
+    wrapped, occluded = make([blocker, hidden, other], memory_horizon=5.0)
+
+    for time_s, objects in ((0.0, [blocker, hidden, other]),
+                            (0.1, [blocker, hidden]),
+                            (0.2, [hidden]),
+                            (0.3, [])):
+        wrapped.objects = objects
+        given = set(ids(occluded.get_observation()))
+        assert given <= {o.track_token for o in objects}
+        step(occluded, time_s + 0.1, ego_at(0.0, 0.0, time_s + 0.1))
