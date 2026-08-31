@@ -217,7 +217,12 @@ def main():
                              f'{", ".join(OCCLUSION_RELEVANT)}')
     parser.add_argument('--scenarios', type=int, default=5)
     parser.add_argument('--duration', type=float, default=15.0)
-    parser.add_argument('--memory-horizon', type=float, default=3.0)
+    parser.add_argument('--memory-horizon', type=float, default=0.0,
+                        help='seconds an occluded track survives. Zero, the '
+                             'default, withholds it outright: the planners '
+                             'under test drop any agent missing from the '
+                             'current frame anyway, so a buffer would grant '
+                             'object permanence rather than restore it.')
     parser.add_argument('--min-expert-distance', type=float, default=20.0,
                         help='skip scenarios where the logged ego barely moves; '
                              'no perception assumption can change those')

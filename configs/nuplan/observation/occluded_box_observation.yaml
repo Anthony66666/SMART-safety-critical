@@ -1,9 +1,28 @@
-# Log-replay tracks, filtered to what the ego can actually see.
+# Log-replay tracks, filtered per frame to what the ego can see right now.
 #
-# Drop-in replacement for nuPlan's own box_observation. Everything else in the
-# simulation -- planner, controller, metrics, scenario filter -- stays exactly
-# as the devkit configures it, so a run under this observation is comparable
-# with a run under box_observation and with published nuPlan numbers.
+# Drop-in replacement for nuPlan's box_observation. Everything else in the
+# simulation -- planner, controller, metrics, scenario filter -- stays as the
+# devkit configures it, so a run under this observation is comparable with a
+# run under box_observation and with published nuPlan numbers.
+#
+# Two decisions are worth stating, because both could have gone the other way.
+#
+# Partial occlusion counts as seen, and the object is passed through with its
+# true, complete box. Recovering an object's full extent from a partial view is
+# what a perception stack is for; charging a planner for not doing it would be
+# measuring the wrong thing. Only an object with no clear sight line to any of
+# its five sample points -- four corners and the centroid -- is withheld.
+#
+# There is no memory. An occluded object is simply absent this frame. Flow
+# Planner's own data processing drops any agent missing from the current frame
+# together with all of its history -- filter_agents_tensor keeps only agents
+# present in the last frame, and pad_agent_states says outright that agents
+# appearing only in the past are discarded -- so the planner has no object
+# permanence of its own, and a buffer here would not be restoring a capability
+# it has but granting one it does not. It would also be the only free parameter
+# in the stack. Measured on a Las Vegas intersection, a three-second buffer cut
+# what was withheld from 16.9% to 6.7%, hiding some 60% of the effect under
+# test. See occluded_box_observation_with_memory for that ablation.
 _target_: smart.nuplan.occluded_observation.build_occluded_observation
 _convert_: 'all'
 # The wrapped observation must reach the factory as config, not as an object:
@@ -14,6 +33,4 @@ observation:
   _target_: nuplan.planning.simulation.observation.tracks_observation.TracksObservation
   _convert_: 'all'
 
-# Seconds an occluded track survives in memory. This is the one free parameter
-# in the occlusion stack and has to be reported with any result.
-memory_horizon: 3.0
+memory_horizon: 0.0

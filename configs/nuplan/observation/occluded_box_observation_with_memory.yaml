@@ -1,0 +1,21 @@
+# Occlusion with a tracking buffer in front of the planner.
+#
+# The ablation against occluded_box_observation, which withholds an occluded
+# object outright. This grants every planner the same object permanence a real
+# tracker would provide: an occluded track is carried forward at its last
+# observed velocity and reported with a stale timestamp until it goes cold.
+#
+# It answers a question worth answering -- how much of the difficulty is
+# removed by memory alone -- but it is not the default, because the planners
+# under test have no such memory themselves and memory_horizon would be the
+# only tunable number in an otherwise parameter-free stack. Whatever it is set
+# to has to be reported with the result.
+_target_: smart.nuplan.occluded_observation.build_occluded_observation
+_convert_: 'all'
+_recursive_: false
+
+observation:
+  _target_: nuplan.planning.simulation.observation.tracks_observation.TracksObservation
+  _convert_: 'all'
+
+memory_horizon: 3.0
