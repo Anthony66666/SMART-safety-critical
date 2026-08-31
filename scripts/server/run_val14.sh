@@ -74,12 +74,18 @@ echo "results   : $NUPLAN_EXP_ROOT"
 # running and set this to whatever is actually free.
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 
-# The simulation is CPU-bound -- measured at roughly 70% CPU against 25% GPU --
-# so the GPU fraction is what caps parallelism, not the model. 0.1 allows ten
-# concurrent simulations per card; raise the threads, not the fraction, if the
-# box has cores to spare.
-GPU_FRACTION=${GPU_FRACTION:-0.1}
-THREADS=${THREADS:-48}
+# This is CPU-bound, and by a wide margin. Profiling one step: 296 ms goes into
+# observation_adapter -- nuPlan's GPKG map queries and the agent-history
+# assembly, all CPU -- against a 54 MB model doing four ODE steps, which is
+# noise on an L40S. Measured overall at roughly 70% CPU against 25% GPU.
+#
+# So the GPU fraction is a purely artificial cap: at 0.1 it allows ten
+# simulations per card while the box has 192 cores sitting idle. A 300-step
+# scenario takes about 2.5 minutes, so 1118 of them is ~47 hours serial; ten
+# ways makes that 4.7 hours, thirty ways about 1.5. Each worker holds a CUDA
+# context of a few hundred MB, so thirty-odd fit in 46 GB with room to spare.
+GPU_FRACTION=${GPU_FRACTION:-0.03}
+THREADS=${THREADS:-64}
 
 # LIMIT caps the scenario count, for a smoke test. Unset means the whole split.
 LIMIT_ARG=""
