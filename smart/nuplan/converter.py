@@ -98,6 +98,15 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
     # the same regime, where the spacing is well under a millimetre.
     agent['position'][..., 0] -= origin[0]
     agent['position'][..., 1] -= origin[1]
+    # Invalid slots must stay exactly zero. They were never written, so the
+    # subtraction above would leave them at minus the origin -- a position
+    # several million metres away that looks like data. SMART's preprocessing
+    # reads `position[:, current_step, 0] != 0` as "invalid but positioned" and
+    # interpolates from it, so a non-zero invalid slot does not fail loudly: it
+    # feeds the tokenizer nonsense and the contamination spreads to agents that
+    # were fine.
+    agent['position'][~agent['valid_mask']] = 0.0
+
     for key in ('position', 'heading', 'velocity', 'shape'):
         agent[key] = agent[key].float()
 
@@ -120,6 +129,17 @@ def _convert_agents(scenario, num_steps, stride):
     for t, iteration in enumerate(iterations):
         objects = {}
         for tracked in scenario.get_tracked_objects_at_iteration(iteration).tracked_objects:
+            # Cones, barriers and roadside debris are not agents. SMART has a
+            # token embedding for vehicles, pedestrians and cyclists and none
+            # for anything else, and tokenize_agent masks on exactly those
+            # three types -- so a fourth type is not modelled badly, it is
+            # skipped in silence and decodes to a degenerate trajectory pinned
+            # to the nearest lane. In Las Vegas these outnumber the real agents,
+            # which is enough to dominate any collision rate measured over them.
+            # They still occlude; the occlusion layer reads nuPlan objects
+            # directly and is unaffected by this.
+            if tracked.tracked_object_type not in AGENT_TYPE:
+                continue
             token = tracked.track_token or tracked.token
             objects[token] = tracked
             order.setdefault(token, len(order))
@@ -133,7 +153,7 @@ def _convert_agents(scenario, num_steps, stride):
     velocity = torch.zeros(num_nodes, num_steps, 3, dtype=torch.float64)
     shape = torch.zeros(num_nodes, num_steps, 3, dtype=torch.float64)
     valid = torch.zeros(num_nodes, num_steps, dtype=torch.bool)
-    types = torch.full((num_nodes,), AGENT_BACKGROUND, dtype=torch.uint8)
+    types = torch.full((num_nodes,), AGENT_VEHICLE, dtype=torch.uint8)
     category = torch.ones(num_nodes, dtype=torch.uint8)
 
     types[av_index] = AGENT_VEHICLE
@@ -151,7 +171,7 @@ def _convert_agents(scenario, num_steps, stride):
 
         for token, tracked in objects.items():
             i = order[token]
-            types[i] = AGENT_TYPE.get(tracked.tracked_object_type, AGENT_BACKGROUND)
+            types[i] = AGENT_TYPE[tracked.tracked_object_type]
             centre = tracked.box.center
             position[i, t] = torch.tensor([centre.x, centre.y, 0.0])
             heading[i, t] = centre.heading
