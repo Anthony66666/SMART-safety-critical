@@ -28,12 +28,47 @@ BENCH=${BENCH:-$HOME/SMART-safety-critical}   # this repository, for the wrapper
 PY="$CONDA/envs/$ENV_NAME/bin/python"
 DEVKIT="$WORK/nuplan-devkit"
 
+# These are probed rather than taken from the environment. A shell that has
+# already exported NUPLAN_DATA_ROOT -- pointing at the versioned directory
+# rather than its parent, say -- silently doubles the path, and the failure
+# arrives as a devkit ValueError about a load path that does not exist.
+find_dir() {
+    for candidate in "$@"; do
+        if [ -d "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+VAL_SPLIT=$(find_dir \
+    "${VAL_SPLIT:-}" \
+    /hqlab/dataset_nas3/nuplan/raw/nuplan-v1.1/splits/val \
+    "${NUPLAN_DATA_ROOT:-}/splits/val" \
+    "${NUPLAN_DATA_ROOT:-}/nuplan-v1.1/splits/val") || {
+    echo "cannot find the val split; set VAL_SPLIT to the directory of .db files" >&2
+    exit 1
+}
+
+MAPS=$(find_dir \
+    "${NUPLAN_MAPS_ROOT:-}" \
+    /hqlab/dataset_nas3/nuplan/raw/maps) || {
+    echo "cannot find the maps; set NUPLAN_MAPS_ROOT" >&2
+    exit 1
+}
+
 export NUPLAN_DEVKIT_ROOT="$DEVKIT"
-export NUPLAN_DATA_ROOT=${NUPLAN_DATA_ROOT:-/hqlab/dataset_nas3/nuplan/raw}
-export NUPLAN_MAPS_ROOT=${NUPLAN_MAPS_ROOT:-/hqlab/dataset_nas3/nuplan/raw/maps}
-export NUPLAN_EXP_ROOT=${NUPLAN_EXP_ROOT:-$WORK/exp}
+export NUPLAN_MAPS_ROOT="$MAPS"
+# Forced, not defaulted: results have to land where score.py looks for them,
+# and an inherited NUPLAN_EXP_ROOT sends them somewhere else entirely.
+export NUPLAN_EXP_ROOT="$WORK/exp"
 export PYTHONPATH="$BENCH:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
+
+echo "val split : $VAL_SPLIT  ($(ls "$VAL_SPLIT"/*.db 2>/dev/null | wc -l) db files)"
+echo "maps      : $MAPS"
+echo "results   : $NUPLAN_EXP_ROOT"
 
 # Three of the four cards were busy when this was written. Check before
 # running and set this to whatever is actually free.
@@ -77,7 +112,8 @@ $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     +planner.flow_planner.enable_ema=false \
     $OBSERVATION \
     scenario_builder=nuplan \
-    scenario_builder.data_root="$NUPLAN_DATA_ROOT/nuplan-v1.1/splits/val" \
+    scenario_builder.data_root="$VAL_SPLIT" \
+    scenario_builder.map_root="$MAPS" \
     scenario_filter=val14 \
     $LIMIT_ARG \
     experiment_uid="flow_planner/val14/$TAG/$(date +%Y-%m-%d-%H-%M-%S)" \
