@@ -63,12 +63,18 @@ fi
 
 mkdir -p "$NUPLAN_EXP_ROOT"
 
+# enable_ema is prefixed with + because it is not a key in Flow Planner's own
+# flow_planner.yaml, and hydra refuses to override what is not there. It has to
+# be false: the published checkpoint is already exported EMA weights, a flat
+# state_dict, so the unwrap branch would look for an ema_state_dict that does
+# not exist.
+
 $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     +simulation=closed_loop_nonreactive_agents \
     planner=flow_planner \
     planner.flow_planner.config_path="$WORK/checkpoints/model_config_resolved.yaml" \
     planner.flow_planner.ckpt_path="$WORK/checkpoints/model.pth" \
-    planner.flow_planner.enable_ema=false \
+    +planner.flow_planner.enable_ema=false \
     $OBSERVATION \
     scenario_builder=nuplan \
     scenario_builder.data_root="$NUPLAN_DATA_ROOT/nuplan-v1.1/splits/val" \
