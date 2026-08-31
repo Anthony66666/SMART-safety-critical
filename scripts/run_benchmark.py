@@ -42,6 +42,7 @@ from nuplan.planning.simulation.observation.idm_agents import IDMAgents
 from nuplan.planning.simulation.observation.tracks_observation import TracksObservation
 from nuplan.planning.simulation.planner.idm_planner import IDMPlanner
 from nuplan.planning.simulation.planner.simple_planner import SimplePlanner
+from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 from nuplan.planning.simulation.runner.simulations_runner import SimulationRunner
 from nuplan.planning.simulation.simulation import Simulation
 from nuplan.planning.simulation.simulation_setup import SimulationSetup
@@ -53,8 +54,76 @@ from smart.nuplan.scenarios import (OCCLUSION_RELEVANT, build_scenario,
                                     expert_distance, find_scenarios)
 
 
+FLOW_CONFIG = 'checkpoints/flow_planner/model_config.yaml'
+FLOW_CKPT = 'checkpoints/flow_planner/model.pth'
+
+
+def build_flow_planner(device='cuda'):
+    """Flow Planner, at the settings its own simulation config uses.
+
+    A learned planner is the point of the exercise. IDM consumes only the
+    nearest obstacle in its own lane -- the least occludable object there is --
+    so it reports a zero gap however severe the occlusion. Flow Planner attends
+    to 32 neighbouring agents drawn from the observation buffer, which is
+    exactly where the occlusion wrapper substitutes what the ego can see.
+    """
+    # The config interpolates a couple of training paths from the environment;
+    # they are never read at inference, but omegaconf resolves eagerly enough
+    # that leaving them unset can fail.
+    os.environ.setdefault('PROJECT_ROOT', os.getcwd())
+    os.environ.setdefault('SAVE_DIR', tempfile.gettempdir())
+
+    from flow_planner.planner import FlowPlanner
+    return FlowPlanner(
+        config_path=_resolvable_flow_config(),
+        ckpt_path=FLOW_CKPT,
+        past_trajectory_sampling=TrajectorySampling(num_poses=20, time_horizon=2),
+        future_trajectory_sampling=TrajectorySampling(num_poses=80, time_horizon=8),
+        # The published checkpoint is already a flat state_dict of exported EMA
+        # weights -- 338 `module.`-prefixed tensors -- not a training
+        # checkpoint carrying an `ema_state_dict` to unwrap. Asking for the
+        # wrapper raises KeyError; this branch strips the prefix and loads.
+        enable_ema=False,
+        device=device,
+        use_cfg=True,
+        cfg_weight=1.0)
+
+
+def _resolvable_flow_config():
+    """The shipped config, with the branches it references but does not carry.
+
+    The config published with the checkpoint was cut out of a full training
+    config tree and still interpolates into parts of it that did not come
+    along -- `${data.dataset.train.future_downsampling_method}` among them.
+    Loading it as-is raises InterpolationKeyError before the model is built.
+    The missing values are taken from the repository's own defaults rather
+    than guessed, and written to a copy so the downloaded file stays exactly
+    as the authors published it.
+    """
+    import omegaconf
+
+    config = omegaconf.OmegaConf.load(FLOW_CONFIG)
+    # Values from flow_planner/script/data/dataset/nuplan_data.yaml, which is
+    # the branch the published config was cut away from. `train.epoch` is only
+    # read by the learning-rate scheduler and never at inference; it is present
+    # so resolution succeeds, not because the number means anything here.
+    defaults = omegaconf.OmegaConf.create({
+        'data': {'dataset': {'train': {
+            'future_downsampling_method': 'uniform',
+            'predicted_neighbor_num': '${model.neighbor_pred_num}'}}},
+        'train': {'epoch': 1},
+    })
+    merged = omegaconf.OmegaConf.merge(defaults, config)
+
+    resolved = os.path.join(tempfile.gettempdir(), 'flow_planner_config.yaml')
+    omegaconf.OmegaConf.save(merged, resolved)
+    return resolved
+
+
 def build_planner(name):
     """A devkit planner, unmodified."""
+    if name == 'flow':
+        return build_flow_planner()
     if name == 'idm':
         return IDMPlanner(target_velocity=10.0, min_gap_to_lead_agent=1.0,
                           headway_time=1.5, accel_max=1.0, decel_max=3.0,
@@ -140,7 +209,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-root', default='/mnt/e/nuplan-mini/nuplan-v1.1_mini/data/cache/mini')
     parser.add_argument('--map-root', default='/mnt/e/nuplan-mini/nuplan-maps-v1.0/maps')
-    parser.add_argument('--planner', default='idm', choices=('idm', 'simple'))
+    parser.add_argument('--planner', default='idm',
+                        choices=('idm', 'simple', 'flow'))
     parser.add_argument('--traffic', default='log', choices=('log', 'idm'))
     parser.add_argument('--scenario-type', default='traversing_intersection',
                         help=f'a nuPlan tag; occlusion-relevant ones are '
@@ -160,6 +230,7 @@ def main():
 
     totals = {'full': {}, 'occluded': {}}
     counts = {'full': {}, 'occluded': {}}
+    deviations = []
     used = 0
     for entry in entries:
         if used >= args.scenarios:
@@ -171,6 +242,7 @@ def main():
             continue
         used += 1
         print(f'{scenario.scenario_name}  expert travels {travelled:.0f} m')
+        paths = {}
 
         for label, kind in (('full', args.traffic),
                             ('occluded', args.traffic + ' occluded')):
@@ -182,10 +254,23 @@ def main():
             except Exception as error:
                 print(f'  {label:9s} FAILED {type(error).__name__}: {error}'[:140])
                 continue
+            paths[label] = [(sample.ego_state.center.x, sample.ego_state.center.y)
+                            for sample in history.data]
             for key, value in score(history, scenario, metrics).items():
                 if isinstance(value, (int, float)):
                     totals[label][key] = totals[label].get(key, 0.0) + value
                     counts[label][key] = counts[label].get(key, 0) + 1
+
+        # The bluntest statement of whether occlusion reached the planner at
+        # all. IDM's two trajectories are identical to 0.000000 m because it
+        # only ever consults its lead vehicle; a planner that reads the wider
+        # scene has to diverge, and if it does not, nothing downstream of it
+        # can be trusted to mean anything.
+        if len(paths) == 2:
+            deviation = max(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+                            for a, b in zip(paths['full'], paths['occluded']))
+            deviations.append(deviation)
+            print(f'  ego trajectories diverge by {deviation:.3f} m')
 
     if not used:
         raise SystemExit('every candidate scenario had a near-stationary expert')
@@ -193,6 +278,9 @@ def main():
     print(f'\n{args.planner} planner, {args.traffic} traffic, '
           f'{used} {args.scenario_type} scenarios, '
           f'memory horizon {args.memory_horizon:g} s')
+    if deviations:
+        print(f'ego trajectory divergence: mean {sum(deviations) / len(deviations):.3f} m, '
+              f'max {max(deviations):.3f} m')
     print(f"\n{'metric':54s} {'full':>10} {'occluded':>10} {'delta':>10}")
     print('-' * 88)
     for key in sorted(set(totals['full']) | set(totals['occluded'])):
