@@ -454,3 +454,68 @@ S1.5 要剔除的"全信息下也不可避"带）。
 
 **零成本的第一步**：`score.py --by-type` 看那三个 tag 是否显著更差。若是，它就是这条路的
 动机证据——现有 planner 的 val14 分数把这些场景平均掉了，没人单独报过。
+
+---
+
+## ★ 第一个真结果：val14 全量，遮挡 gap（2026-09-01）
+
+1118 个场景，官方仿真 + 官方 Flow Planner + 官方指标，**唯一变量是 observation**。逐帧语义（`memory_horizon: 0`）。
+
+| | baseline | occluded | delta |
+|---|---|---|---|
+| **score** | 88.25 | 86.58 | **−1.67** |
+| **no_ego_at_fault_collisions** | 94.77 | 93.65 | **−1.12** |
+| **time_to_collision_within_bound** | 89.27 | 87.92 | **−1.34** |
+| ego_progress_along_expert_route | 93.19 | 92.20 | −0.99 |
+| ego_is_comfortable | 94.45 | 93.56 | −0.89 |
+| drivable_area_compliance | 98.12 | 97.67 | −0.45 |
+| driving_direction_compliance | 99.46 | 99.60 | +0.13 |
+| ego_is_making_progress | 99.64 | 99.73 | +0.09 |
+| speed_limit_compliance | 97.75 | 97.79 | +0.04 |
+
+**掉得最多的是两个安全指标**，而遮挡不该碰的合规项基本不动。效应落在机制预测的位置。
+
+### 噪声底：确定性，不是 2 分
+
+baseline 复现出 88.25 而非已发表的 90.43（差 2.18），一度担心 run-to-run 方差会淹掉 1.67 的 gap。
+**配对分析否定了这个担心**：1118 个场景里 **423 个变化精确为 0.00**——输入相同时流水线是确定性的，
+噪声是 0 不是 2 分。所以那 2.18 是**系统性偏差**（devkit 版本 / 配置差异），gap 是真信号。
+
+### 分布形状才是发现
+
+```
+mean -1.67   sd 18.16   se 0.54  -> 3.1 个标准误
+worse / same / better   408 / 423 / 287
+p05 -12.59   p50 +0.00   p95 +2.32
+```
+
+**遮挡不是把所有场景拉低一点，而是大部分毫发无损、少数被打得很惨。** 中位数为 0，
+尾巴单边（p05 −12.6 vs p95 +2.3）。这正是遮挡 benchmark 该有的形状——多数路况没有重要
+东西被挡住；一小部分变得真正困难。**若效应均匀摊开反而可疑。**
+
+### 按场景类型（前后各三）
+
+| 类型 | n | delta |
+|---|---|---|
+| following_lane_with_lead | **15** | **−19.85** ⚠️ 见下 |
+| changing_lane | 70 | **−5.56** |
+| traversing_pickup_dropoff | 99 | −3.37 |
+| waiting_for_pedestrian_to_cross | 53 | −2.52 |
+| … | | |
+| starting_straight_traffic_light_intersection | 98 | **+0.00** |
+| high_lateral_acceleration | 96 | **+0.01** |
+
+`changing_lane` 最可解释：变道要看相邻车道，而挡住视线的正是旁边那辆车。
+`waiting_for_pedestrian_to_cross` 是行人从车后走出，遮挡事故的典型形态。
+**直行过灯口和大横向加速度几乎为零（各约百个样本），是有力的阴性对照。**
+
+⚠️ **`following_lane_with_lead` 的 −19.85 暂不采用。** n 只有 15，且**与机制矛盾**——
+跟车时前车是全场最不可能被遮挡的目标（同一论证解释了 IDM 为何对遮挡免疫）。
+要么背后有真实原因（前车的前车、横向切入），要么是 bug。**这 15 个场景需逐个查证**，
+结论出来之前不引用这个数字。
+
+### 待办
+
+- 逐个查那 15 个 `following_lane_with_lead`
+- 挖 p05 尾部场景 → 这正是 S1.5 中间带（全可观可避、遮挡下不可避）的候选
+- val14 反应式两轮（对照 83.31）
