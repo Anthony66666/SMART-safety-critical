@@ -66,7 +66,12 @@ for i in $(seq 0 $((N - 1))); do
 done
 
 echo "all parts complete, joining..."
-cat "$PARTS"/part.* > "$OUT"
+# Explicit numeric order. `cat part.*` sorts lexicographically, which puts
+# part.10 before part.2 and scrambles the file -- while leaving its total size
+# exactly right, so the check below would wave it through. The 8-part test that
+# validated this script never showed it, because with parts 0-7 the two
+# orderings coincide.
+for i in $(seq 0 $((N - 1))); do cat "$PARTS/part.$i"; done > "$OUT"
 GOT=$(stat -c%s "$OUT")
 if [ "$GOT" -ne "$TOTAL" ]; then
     echo "joined file is $GOT bytes, expected $TOTAL -- not deleting parts" >&2
