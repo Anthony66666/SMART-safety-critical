@@ -200,6 +200,9 @@ def main():
     parser.add_argument('--occluded', required=True, help='experiment dir, occluded')
     parser.add_argument('--out-dir', default='occlusion_gifs')
     parser.add_argument('--scenarios', type=int, default=3)
+    parser.add_argument('--tokens', default=None,
+                        help='comma-separated scenario tokens to render instead '
+                             'of the first few shared ones')
     parser.add_argument('--radius', type=float, default=60.0)
     parser.add_argument('--fps', type=int, default=10)
     parser.add_argument('--stride', type=int, default=2,
@@ -208,12 +211,23 @@ def main():
 
     baseline_logs = find_logs(args.baseline)
     occluded_logs = find_logs(args.occluded)
-    shared = sorted(set(baseline_logs) & set(occluded_logs))
+    shared = set(baseline_logs) & set(occluded_logs)
     if not shared:
         raise SystemExit('the two runs have no scenario tokens in common')
 
+    if args.tokens:
+        # Keep the order given: these are usually ranked worst-first, and the
+        # point is to look at them in that order.
+        wanted = [t.strip() for t in args.tokens.split(',') if t.strip()]
+        missing = [t for t in wanted if t not in shared]
+        if missing:
+            raise SystemExit('not in both runs: ' + ', '.join(missing))
+        chosen = wanted
+    else:
+        chosen = sorted(shared)[:args.scenarios]
+
     os.makedirs(args.out_dir, exist_ok=True)
-    for token in shared[:args.scenarios]:
+    for token in chosen:
         baseline = SimulationLog.load_data(Path(baseline_logs[token]))
         occluded = SimulationLog.load_data(Path(occluded_logs[token]))
         out_path = os.path.join(args.out_dir, f'{token}.gif')
