@@ -30,10 +30,17 @@ BATCH = 400  # well under SQLite's variable limit
 
 
 def read_tokens(path):
-    """The scenario tokens listed in a nuPlan scenario_filter yaml."""
+    """The scenario tokens listed in a nuPlan scenario_filter yaml.
+
+    Tokens appear both quoted and bare in these files -- val14 quotes all of
+    its, test14-hard quotes only the 182 that would otherwise parse as YAML
+    numbers and leaves 90 bare. Matching only the quoted form silently found
+    two thirds of them and staged a subset that looked like a complete run.
+    """
     with open(path) as handle:
         text = handle.read()
-    return [bytes.fromhex(t) for t in re.findall(r'^\s*-\s*"([0-9a-f]{16})"', text, re.M)]
+    found = re.findall(r'^\s*-\s*"?([0-9a-f]{16})"?\s*$', text, re.M)
+    return [bytes.fromhex(t) for t in found]
 
 
 def tokens_in_log(db_path, tokens):
