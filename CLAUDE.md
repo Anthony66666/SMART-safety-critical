@@ -1,6 +1,8 @@
 # 遮挡感知的 nuPlan 闭环 benchmark
 
-在 `nuplan-safety-bench` 分支上。完整研究方案在 `~/.claude/plans/tidy-questing-shell.md`——**开工前先读它**，下面只写方案里没有的操作性内容。
+在 `nuplan-safety-bench` 分支上。完整研究方案在 [`docs/PLAN.md`](docs/PLAN.md)——**开工前先读它**，下面只写方案里没有的操作性内容。方案是活文档，有新结论就往里加。
+
+（`~/.claude/plans/tidy-questing-shell.md` 是它的历史出处，已不再维护；以仓库内这份为准。）
 
 一句话概括：所有闭环 planning 评测都给 planner 发周围 agent 的**真值框**。这个工作把它拿掉，只留 ego 真正能看见的，然后用**官方 nuPlan 仿真 + 官方 planner + 官方指标**测排名怎么变。
 
