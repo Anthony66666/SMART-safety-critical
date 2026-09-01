@@ -10,8 +10,26 @@ import os
 import sys
 
 
+def failures(run_dir):
+    """How many simulations in this run did not complete.
+
+    A scenario that crashes is not scored, so it leaves the final average alone
+    and vanishes -- a run where half the split failed can post a fine number.
+    The runner report is the only place that says so.
+    """
+    import pandas as pd
+
+    reports = glob.glob(os.path.join(run_dir, 'runner_report.parquet'))
+    if not reports:
+        return None
+    frame = pd.read_parquet(reports[0])
+    if 'succeeded' not in frame.columns:
+        return None
+    return int((~frame.succeeded.astype(bool)).sum()), len(frame)
+
+
 def scores(root):
-    """Every run under `root`, newest last, as (tag, final score)."""
+    """Every run under `root`, newest last, as (tag, final score, counts)."""
     found = []
     for path in sorted(glob.glob(os.path.join(root, '**', 'aggregator_metric', '*.parquet'),
                                  recursive=True)):
@@ -19,8 +37,10 @@ def scores(root):
         frame = pd.read_parquet(path)
         row = frame[frame.scenario == 'final_score']
         if len(row):
+            run_dir = path.split('/aggregator_metric')[0]
             found.append((path.split('/exp/')[-1].split('/aggregator_metric')[0],
-                          float(row.score.iloc[0]), len(frame) - 1))
+                          float(row.score.iloc[0]), len(frame) - 1,
+                          failures(run_dir)))
     return found
 
 
@@ -29,8 +49,11 @@ def main():
     found = scores(root)
     if not found:
         raise SystemExit(f'no aggregator output under {root}')
-    for tag, score, count in found:
-        print(f'{score * 100:6.2f}   {count:5d} scenarios   {tag}')
+    for tag, score, count, failed in found:
+        note = ''
+        if failed is not None and failed[0]:
+            note = f'   {failed[0]}/{failed[1]} FAILED'
+        print(f'{score * 100:6.2f}   {count:5d} scenarios{note}   {tag}')
     if len(found) >= 2:
         print(f'\nlatest two differ by {(found[-1][1] - found[-2][1]) * 100:+.2f} points')
 
