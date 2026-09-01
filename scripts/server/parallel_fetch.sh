@@ -20,7 +20,7 @@ N=${3:-16}
 
 TOTAL=$(curl -fsI "$URL" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}')
 [ -n "$TOTAL" ] || { echo "could not read Content-Length from $URL" >&2; exit 1; }
-printf 'total %.1f GB over %d connections\n' "$(echo "$TOTAL/1073741824" | bc -l)" "$N"
+awk -v t="$TOTAL" -v n="$N" 'BEGIN{printf "total %.1f GB over %d connections\n", t/1073741824, n}'
 
 if [ -s "$OUT" ] && [ "$(stat -c%s "$OUT")" = "$TOTAL" ]; then
     echo "already complete: $OUT"; exit 0
@@ -78,4 +78,4 @@ if [ "$GOT" -ne "$TOTAL" ]; then
     exit 1
 fi
 rm -rf "$PARTS"
-printf 'done: %s (%.1f GB)\n' "$OUT" "$(echo "$GOT/1073741824" | bc -l)"
+awk -v o="$OUT" -v g="$GOT" 'BEGIN{printf "done: %s (%.1f GB)\n", o, g/1073741824}'
