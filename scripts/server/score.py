@@ -87,12 +87,50 @@ def by_type(frame):
     return out
 
 
+def paired(before, after):
+    """Compare two runs scenario by scenario rather than in aggregate.
+
+    Two averages differing by a point says nothing on its own: the sampler is
+    stochastic and the runs could differ by that much for no reason at all.
+    The same scenario under both conditions is a paired observation, and the
+    spread across pairs is what says whether a shift in the mean is real.
+    """
+    def rows(frame):
+        keep = frame[(frame.scenario != 'final_score') & frame.log_name.notna()]
+        return keep.set_index('scenario').score
+
+    a, b = rows(before), rows(after)
+    shared = a.index.intersection(b.index)
+    if len(shared) < 2:
+        print('\nno shared scenarios to pair')
+        return
+    delta = (b[shared] - a[shared]) * 100
+
+    worse = int((delta < -1e-9).sum())
+    better = int((delta > 1e-9).sum())
+    same = len(delta) - worse - better
+    mean = float(delta.mean())
+    sd = float(delta.std(ddof=1))
+    stderr = sd / len(delta) ** 0.5
+
+    print(f'\npaired over {len(delta)} scenarios')
+    print(f'  mean change      {mean:+.2f} points')
+    print(f'  std deviation    {sd:.2f}')
+    print(f'  standard error   {stderr:.2f}   -> mean is {abs(mean) / stderr:.1f} '
+          f'standard errors from zero')
+    print(f'  worse / same / better   {worse} / {same} / {better}')
+    for q in (0.05, 0.25, 0.5, 0.75, 0.95):
+        print(f'  p{int(q * 100):02d} {float(delta.quantile(q)):+8.2f}')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('root', nargs='?',
                         default=os.path.expanduser('~/occlusion-bench/exp'))
     parser.add_argument('--by-type', action='store_true',
                         help='also break the two newest runs down by scenario type')
+    parser.add_argument('--paired', action='store_true',
+                        help='compare the two newest runs scenario by scenario')
     args = parser.parse_args()
 
     runs = load_runs(args.root)
@@ -121,6 +159,9 @@ def main():
         mark = '  <--' if abs(gap) > 5e-4 else ''
         print(f'{name:34s} {before[name] * 100:9.2f} {after[name] * 100:9.2f} '
               f'{gap * 100:+9.2f}{mark}')
+
+    if args.paired:
+        paired(runs[-2]['frame'], runs[-1]['frame'])
 
     if args.by_type:
         earlier, later = by_type(runs[-2]['frame']), by_type(runs[-1]['frame'])
