@@ -1,0 +1,34 @@
+# IDM-driven traffic, filtered to what the ego can actually see.
+#
+# The reactive counterpart of occluded_box_observation. nuPlan's reactive
+# closed-loop challenge drives background traffic with IDM instead of replaying
+# the log, so the occlusion has to wrap that rather than TracksObservation --
+# otherwise the reactive condition would quietly fall back to log replay and
+# stop being the benchmark it claims to be.
+#
+# The IDM parameters are copied from the devkit's own idm_agents_observation so
+# the traffic is identical to the unoccluded run; only what reaches the planner
+# differs.
+_target_: smart.nuplan.occluded_observation.build_occluded_observation
+_convert_: 'all'
+# The wrapped observation must reach the factory as config, not as an object:
+# it needs the scenario, which only the factory has.
+_recursive_: false
+
+observation:
+  _target_: nuplan.planning.simulation.observation.idm_agents.IDMAgents
+  _convert_: 'all'
+  target_velocity: 10
+  min_gap_to_lead_agent: 1.0
+  headway_time: 1.5
+  accel_max: 1.0
+  decel_max: 2.0
+  open_loop_detections_types: ["PEDESTRIAN", "BARRIER", "CZONE_SIGN", "TRAFFIC_CONE", "GENERIC_OBJECT"]
+  minimum_path_length: 20
+  planned_trajectory_samples: null
+  planned_trajectory_sample_interval: null
+  radius: 100
+
+# Seconds an occluded track survives in memory. Zero is per-frame, which is the
+# default everywhere in this benchmark; see smart/occlusion/tracking.py.
+memory_horizon: 0.0

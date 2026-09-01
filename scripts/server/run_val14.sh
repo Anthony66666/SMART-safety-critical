@@ -103,13 +103,40 @@ fi
 THREADS_ARG=""
 [ "$WORKER" = "ray_distributed" ] && THREADS_ARG="worker.threads_per_node=$THREADS"
 
+# SPLIT selects the scenario filter, and with it the data and the builder.
+# test14 lives in a different split entirely -- nuplan_challenge reads
+# nuplan-v1.1/test/, not the val directory -- so pointing the val data at a
+# test14 filter would quietly evaluate whichever of its tokens happened to
+# also be in val.
+SPLIT=${SPLIT:-val14}
+case "$SPLIT" in
+    val14)         BUILDER=nuplan ;;
+    test14-hard|test14-random) BUILDER=nuplan_challenge ;;
+    *) echo "unknown SPLIT '$SPLIT' (val14 | test14-hard | test14-random)" >&2; exit 1 ;;
+esac
+
+# REACTIVITY picks nuPlan's own challenge. Non-reactive replays the log;
+# reactive drives the background traffic with IDM. They are scored by different
+# aggregators and published as separate columns, so they are separate runs.
+REACTIVITY=${REACTIVITY:-nonreactive}
+case "$REACTIVITY" in
+    nonreactive) CHALLENGE=closed_loop_nonreactive_agents; OCCLUDED_OBS=occluded_box_observation ;;
+    reactive)    CHALLENGE=closed_loop_reactive_agents;    OCCLUDED_OBS=occluded_idm_agents_observation ;;
+    *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive)" >&2; exit 1 ;;
+esac
+
 if [ "$MODE" = "occluded" ]; then
-    OBSERVATION="observation=occluded_box_observation"
+    # The occluded observation has to wrap whatever the challenge uses, or the
+    # reactive condition silently reverts to log replay.
+    OBSERVATION="observation=$OCCLUDED_OBS"
     TAG=occluded
 else
     OBSERVATION=""
     TAG=baseline
 fi
+
+echo "split $SPLIT   $REACTIVITY   $TAG"
+
 
 mkdir -p "$NUPLAN_EXP_ROOT"
 
@@ -120,18 +147,18 @@ mkdir -p "$NUPLAN_EXP_ROOT"
 # not exist.
 
 $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
-    +simulation=closed_loop_nonreactive_agents \
+    +simulation=$CHALLENGE \
     planner=flow_planner \
     planner.flow_planner.config_path="$WORK/checkpoints/model_config_resolved.yaml" \
     planner.flow_planner.ckpt_path="$WORK/checkpoints/model.pth" \
     +planner.flow_planner.enable_ema=false \
     $OBSERVATION \
-    scenario_builder=nuplan \
+    scenario_builder=$BUILDER \
     scenario_builder.data_root="$VAL_SPLIT" \
     scenario_builder.map_root="$MAPS" \
-    scenario_filter=val14 \
+    scenario_filter=$SPLIT \
     $LIMIT_ARG \
-    experiment_uid="flow_planner/val14/$TAG/$(date +%Y-%m-%d-%H-%M-%S)" \
+    experiment_uid="flow_planner/$SPLIT/$REACTIVITY/$TAG/$(date +%Y-%m-%d-%H-%M-%S)" \
     worker=$WORKER \
     distributed_mode=SINGLE_NODE \
     $THREADS_ARG \
