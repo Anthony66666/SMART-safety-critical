@@ -1,0 +1,97 @@
+# 遮挡感知的 nuPlan 闭环 benchmark
+
+在 `nuplan-safety-bench` 分支上。完整研究方案在 `~/.claude/plans/tidy-questing-shell.md`——**开工前先读它**，下面只写方案里没有的操作性内容。
+
+一句话概括：所有闭环 planning 评测都给 planner 发周围 agent 的**真值框**。这个工作把它拿掉，只留 ego 真正能看见的，然后用**官方 nuPlan 仿真 + 官方 planner + 官方指标**测排名怎么变。
+
+## 三个 conda 环境，别用错
+
+| 环境 | 用途 |
+|---|---|
+| `flow_planner` | **默认用这个。** torch 2.3 + nuplan-devkit + Flow Planner。跑 benchmark、测试、渲染都在这里 |
+| `nuplan` | torch 1.9，devkit 能用但跑不了 Flow Planner。基本弃用 |
+| `smart` | 原 SMART 仓库的环境，WOMD 那条线才需要 |
+
+一律用绝对路径调解释器，**不要 `conda activate`**——非交互 shell 里 conda 初始化不可靠，这个坑踩过：
+
+```bash
+PYTHONPATH=. ~/anaconda3/envs/flow_planner/bin/python -m pytest tests/ -q
+```
+
+## 数据和 checkpoint
+
+- nuPlan mini：`/mnt/e/nuplan-mini/`（`nuplan-v1.1_mini/data/cache/mini/` 是 db，`nuplan-maps-v1.0/maps/` 是地图）
+- nuplan-devkit 源码：`~/nuplan-devkit`
+- Flow Planner 源码：`~/SimAgentJEPA/external/Flow-Planner`
+- Flow Planner 权重：`checkpoints/flow_planner/`（gitignore，从 HuggingFace `ttwhy/flow-planner` 取）
+
+## 网络
+
+外网要先开代理，`proxy_on` 是 `.bashrc` 里的函数，非交互 shell 加载不到，手动设：
+
+```bash
+WH=$(ip route show | awk '/default/ {print $3; exit}')
+export HTTPS_PROXY="http://${WH}:7897" HTTP_PROXY="$HTTPS_PROXY" https_proxy="$HTTPS_PROXY" http_proxy="$HTTPS_PROXY"
+```
+
+`git push` 经常撞 TLS 握手失败，设了代理重试即可。
+
+## 服务器（val14 全量评测）
+
+`ssh l40s`，4×L40S + 192 CPU，`$HOME=/lab/haoq_lab/12432702`。**SSH 很不稳，经常超时，重试几次**。
+
+- 工作区 `~/occlusion-bench`，仓库 `~/SMART-safety-critical`
+- 数据 `/hqlab/dataset_nas3/nuplan/raw/`
+- 连不上 huggingface.co，用 `hf-mirror.com`
+- 环境 `~/miniforge3/envs/flow_planner`
+
+```bash
+bash scripts/server/setup_val14.sh                              # 一次性
+CUDA_VISIBLE_DEVICES=3 LIMIT=4 bash scripts/server/run_val14.sh baseline   # 冒烟
+CUDA_VISIBLE_DEVICES=3 bash scripts/server/run_val14.sh baseline           # 全量
+python scripts/server/score.py ~/occlusion-bench/exp --by-type
+```
+
+**验收线：baseline 必须接近 Flow Planner 已发表的 90.43（Val14 非反应式）。对不上就别看遮挡的数字**——harness 不可信的话，差值没有意义。
+
+## 我们自己的代码
+
+只有三块是这个工作的贡献，其余全部用官方的：
+
+- `smart/occlusion/visibility.py`——2D 视线几何，**零自由参数**
+- `smart/occlusion/tracking.py`——跨遮挡的目标记忆，**不依赖 nuPlan**，可用合成序列测
+- `smart/nuplan/occluded_observation.py`——包装任意 `AbstractObservation`，过滤 `DetectionsTracks`
+
+指标、碰撞判定、责任归属**一律用 devkit 的**。曾经自己重写过一套，已删除——自造指标和官方数字对不上，整个对比就无法引用。
+
+## 已经踩过的坑，别重蹈
+
+**遮挡观测必须是全观测的严格子集。** 跟踪缓冲分不清"被遮挡"和"底层不再报告"（目标驶出检测范围），不加约束会把已消失的目标当幽灵保留，导致**遮挡条件比全观测条件信息更多**，实验倒转。已有测试锁住这个不变量。
+
+**部分遮挡按可见处理。** 5 个采样点（4 角 + 质心）有 1 个通视就算看见，且透传真实完整框——从局部观测补全是感知该做的事。
+
+**默认逐帧，`memory_horizon: 0`。** Flow Planner 的 `filter_agents_tensor(reverse=True)` 只保留当前帧存在的 agent，被遮挡目标连同历史一起丢弃——它本来就没有记忆能力。外加缓冲等于凭空赋予它不具备的能力。带记忆的版本留作显式消融。
+
+**IDM planner 对遮挡完全免疫**，两个条件下轨迹逐点相同（0.000000 m）。它只取自己路径上最近的障碍物，而最近前车恰恰最不可能被遮挡。**不能用 IDM 做主力**，需要 Flow Planner 这类会用全场信息的。
+
+**验证不变量要双向查。** 曾经只查"被扣留的是否真的不可见"（零违例），漏了反方向"被给出的是否真的可见"——问题全在那一侧。
+
+**选场景必须按官方 `scenario_tag`。** 随意挑起始帧会挑到静止场景（mini 里 `stationary` 标签 62375 帧），expert 全程只动 3.8 米，任何感知假设都不可能改变结果。见 `smart/nuplan/scenarios.py`。
+
+**ego_pose 存的是后轴不是车体中心**，Pacifica 差 1.461 m。
+
+**性能**：瓶颈在 CPU（nuPlan 地图查询约 296 ms/步），不在 GPU。遮挡本身只加约 5%。
+
+## 常用命令
+
+```bash
+PYTHONPATH=. ~/anaconda3/envs/flow_planner/bin/python -m pytest tests/ -q      # 48 个测试
+PYTHONPATH=. ~/anaconda3/envs/flow_planner/bin/python scripts/run_benchmark.py --planner flow --scenarios 6
+PYTHONPATH=. ~/anaconda3/envs/flow_planner/bin/python scripts/render_nuplan_gif.py --baseline <dir> --occluded <dir> --out-dir gifs
+```
+
+`scripts/run_benchmark.py` 是本地小规模用的手写循环，**用 `PerfectTrackingController`，复现不了已发表分数**。要对齐官方数字必须走 `run_simulation.py`（官方用 `two_stage_controller`），见 `scripts/server/run_val14.sh`。
+
+## 风格
+
+提交信息写清楚**为什么**，尤其是踩过的坑和被推翻的假设——这个项目里好几个结论是先错后改的，过程比结论有价值。数字要实测，不要估计；单场景的数字不能当结论。
