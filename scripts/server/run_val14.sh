@@ -166,6 +166,22 @@ fi
 # scoring needs none of it -- the aggregator parquet is a few megabytes. Keep
 # them only when the run is one whose scenarios will be rendered or examined;
 # otherwise three runs fill a disk quota and everything dies at once.
+# TOKENS re-runs a named handful of scenarios instead of the whole split. The
+# point is the logs: a full run with them costs about 57 GB, almost all of it
+# the planner object pickled once per scenario, but a dozen scenarios cost a
+# few hundred MB. So score the split without logs, then come back for whichever
+# scenarios turned out to be worth looking at.
+TOKEN_ARG=""
+if [ -n "${TOKENS:-}" ]; then
+    TOKEN_ARG="scenario_filter.scenario_tokens=[${TOKENS}]                scenario_filter.num_scenarios_per_type=null                scenario_filter.limit_total_scenarios=null"
+    KEEP_LOGS=1
+    # A handful of scenarios does not need ray, and running in-process means a
+    # failure prints its own traceback instead of a stalled progress bar.
+    WORKER=${WORKER_OVERRIDE:-sequential}
+    THREADS_ARG=""
+    echo "re-running $(echo "$TOKENS" | tr ',' '\n' | wc -l) named scenarios with logs"
+fi
+
 KEEP_LOGS=${KEEP_LOGS:-0}
 if [ "$KEEP_LOGS" = "1" ]; then
     LOG_ARG=""
@@ -191,6 +207,7 @@ $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     +planner.flow_planner.enable_ema=false \
     $OBSERVATION \
     $LOG_ARG \
+    $TOKEN_ARG \
     scenario_builder=$BUILDER \
     scenario_builder.data_root="$VAL_SPLIT" \
     scenario_builder.map_root="$MAPS" \
