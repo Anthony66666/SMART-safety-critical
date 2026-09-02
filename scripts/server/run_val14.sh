@@ -162,6 +162,19 @@ if command -v nvidia-smi >/dev/null; then
 fi
 
 
+# Each 1118-scenario run writes about 57 GB of per-frame simulation logs, and
+# scoring needs none of it -- the aggregator parquet is a few megabytes. Keep
+# them only when the run is one whose scenarios will be rendered or examined;
+# otherwise three runs fill a disk quota and everything dies at once.
+KEEP_LOGS=${KEEP_LOGS:-0}
+if [ "$KEEP_LOGS" = "1" ]; then
+    LOG_ARG=""
+    echo "keeping per-frame simulation logs (~57 GB for a full split)"
+else
+    LOG_ARG="callback=[]"
+    echo "not writing per-frame simulation logs; set KEEP_LOGS=1 if you need them"
+fi
+
 mkdir -p "$NUPLAN_EXP_ROOT"
 
 # enable_ema is prefixed with + because it is not a key in Flow Planner's own
@@ -177,6 +190,7 @@ $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     planner.flow_planner.ckpt_path="$WORK/checkpoints/model.pth" \
     +planner.flow_planner.enable_ema=false \
     $OBSERVATION \
+    $LOG_ARG \
     scenario_builder=$BUILDER \
     scenario_builder.data_root="$VAL_SPLIT" \
     scenario_builder.map_root="$MAPS" \
