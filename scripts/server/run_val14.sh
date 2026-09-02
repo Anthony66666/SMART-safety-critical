@@ -142,6 +142,25 @@ esac
 
 echo "split $SPLIT   $REACTIVITY   $TAG"
 
+# Check the card has room before spending hours finding out it does not. A run
+# on an already-occupied GPU dies as CUDA OOM inside the ray workers, which
+# surfaces as a pile of failed simulations and an aggregate score computed over
+# whichever handful survived -- a number that looks entirely reasonable.
+if command -v nvidia-smi >/dev/null; then
+    VIS=${CUDA_VISIBLE_DEVICES:-0}
+    FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "${VIS%%,*}" 2>/dev/null | head -1)
+    if [ -n "$FREE" ]; then
+        echo "gpu ${VIS%%,*}: ${FREE} MiB free"
+        # Each concurrent simulation holds a CUDA context plus the model; the
+        # default fraction allows about thirty of them.
+        if [ "$FREE" -lt 8000 ]; then
+            echo "only ${FREE} MiB free on gpu ${VIS%%,*} -- pick an idle one, or" >&2
+            echo "raise GPU_FRACTION to run fewer simulations at once." >&2
+            exit 1
+        fi
+    fi
+fi
+
 
 mkdir -p "$NUPLAN_EXP_ROOT"
 
