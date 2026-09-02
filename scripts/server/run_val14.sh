@@ -196,6 +196,24 @@ else
     echo "not writing per-frame simulation logs; set KEEP_LOGS=1 if you need them"
 fi
 
+# SEED pins Flow Planner's sampling noise to the simulation step. Without it
+# two identical runs disagree on 621 of 1118 scenarios and 0.78 points, which
+# is the same size as the effect being measured. Unset SEED to reproduce the
+# original unpinned behaviour.
+if [ -n "${SEED:-}" ]; then
+    PLANNER_ARG="planner=seeded_flow_planner \
+        planner.seeded_flow_planner.seed=$SEED \
+        planner.seeded_flow_planner.planner.config_path=$WORK/checkpoints/model_config_resolved.yaml \
+        planner.seeded_flow_planner.planner.ckpt_path=$WORK/checkpoints/model.pth"
+    echo "seeded planner, seed=$SEED"
+else
+    PLANNER_ARG="planner=flow_planner \
+        planner.flow_planner.config_path=$WORK/checkpoints/model_config_resolved.yaml \
+        planner.flow_planner.ckpt_path=$WORK/checkpoints/model.pth \
+        +planner.flow_planner.enable_ema=false"
+    echo "UNSEEDED planner -- results will not reproduce; set SEED=0 to pin them"
+fi
+
 mkdir -p "$NUPLAN_EXP_ROOT"
 
 # enable_ema is prefixed with + because it is not a key in Flow Planner's own
@@ -206,10 +224,7 @@ mkdir -p "$NUPLAN_EXP_ROOT"
 
 $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     +simulation=$CHALLENGE \
-    planner=flow_planner \
-    planner.flow_planner.config_path="$WORK/checkpoints/model_config_resolved.yaml" \
-    planner.flow_planner.ckpt_path="$WORK/checkpoints/model.pth" \
-    +planner.flow_planner.enable_ema=false \
+    $PLANNER_ARG \
     $OBSERVATION \
     $LOG_ARG \
     $TOKEN_ARG \

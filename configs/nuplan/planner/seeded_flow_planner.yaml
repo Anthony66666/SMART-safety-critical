@@ -1,0 +1,44 @@
+# Flow Planner with its sampling noise pinned to the simulation step.
+#
+# Flow Planner draws fresh noise on every call, so the same scenario run twice
+# gives different trajectories -- 0.288 m apart after 299 steps in one process,
+# and across a full val14 run two identical configurations disagree on 621 of
+# 1118 scenarios and 0.78 points overall. The occlusion effect being measured
+# is the same size as that, so without pinning the noise the comparison cannot
+# say anything.
+#
+# Seeding by step means both conditions draw the same noise at step k, so any
+# difference between them comes from what the planner was shown. Change `seed`
+# to draw a different but equally reproducible sample; running a few seeds is
+# how to separate a real effect from sampling luck.
+seeded_flow_planner:
+  _target_: smart.nuplan.seeded_planner.SeededPlanner
+  _convert_: 'all'
+  # The inner planner must arrive as config for the factory to build it.
+  _recursive_: false
+
+  seed: 0
+
+  planner:
+    _target_: flow_planner.planner.FlowPlanner
+    _convert_: "all"
+
+    config_path: ???
+    ckpt_path: ???
+
+    past_trajectory_sampling:
+      _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+      _convert_: "all"
+      num_poses: 20
+      time_horizon: 2
+
+    future_trajectory_sampling:
+      _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+      _convert_: "all"
+      num_poses: 80
+      time_horizon: 8
+
+    # The published checkpoint is a flat state_dict of exported EMA weights,
+    # with no 'ema_state_dict' key to unwrap.
+    enable_ema: false
+    device: cuda
