@@ -187,7 +187,12 @@ if [ "$KEEP_LOGS" = "1" ]; then
     LOG_ARG=""
     echo "keeping per-frame simulation logs (~57 GB for a full split)"
 else
-    LOG_ARG="callback=[]"
+    # Remove just this callback from the composed config. `callback=[]` looks
+    # right and is not: callback is a defaults-list group, so hydra reads that
+    # as a value override and stops with "Key 'callback' is not in struct".
+    # Deleting the one key leaves cfg.callback an empty dict, which both
+    # build_simulation_callbacks and the simulation builder handle.
+    LOG_ARG="~callback.simulation_log_callback"
     echo "not writing per-frame simulation logs; set KEEP_LOGS=1 if you need them"
 fi
 
