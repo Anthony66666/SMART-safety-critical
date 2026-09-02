@@ -76,11 +76,26 @@ def main():
     args = parser.parse_args()
 
     tokens = read_tokens(args.filter)
-    if not tokens:
-        raise SystemExit(f'no scenario tokens found in {args.filter}')
     logs = sorted(glob.glob(os.path.join(args.val_split, '*.db')))
     if not logs:
         raise SystemExit(f'no .db files under {args.val_split}')
+
+    if not tokens:
+        # test14-random names no tokens: it takes the first twenty scenarios of
+        # each type in scan order across the whole split. Which logs are present
+        # therefore decides which scenarios are chosen, so a subset is a
+        # different benchmark. Stage all of it or none of it.
+        print(f'{os.path.basename(args.filter)} lists no scenario tokens -- it '
+              f'selects by type and quota over whatever logs it finds, so the '
+              f'whole split has to be staged.')
+        needed = {p: set() for p in logs}
+        total = sum(os.path.getsize(p) for p in needed)
+        print(f'{len(needed)} logs, {total / 2**30:.1f} GB')
+        if not args.copy:
+            print('\nsurvey only; pass --copy to stage them')
+            return
+        stage_all(needed, args.dest, args.workers)
+        return
     print(f'{len(tokens)} val14 tokens, {len(logs)} logs in the split\n'
           f'surveying with {args.workers} workers...', flush=True)
 
@@ -108,7 +123,12 @@ def main():
         print('\nsurvey only; pass --copy to stage them')
         return
 
-    os.makedirs(args.dest, exist_ok=True)
+    stage_all(needed, args.dest, args.workers)
+
+
+def stage_all(needed, dest, workers):
+    """Copy the chosen logs, skipping any already staged intact."""
+    os.makedirs(dest, exist_ok=True)
 
     def stage(path):
         """Copy one log, skipping it if a complete copy is already there.
@@ -118,7 +138,7 @@ def main():
         truncated file, and a truncated db fails deep inside the simulation
         rather than here.
         """
-        target = os.path.join(args.dest, os.path.basename(path))
+        target = os.path.join(dest, os.path.basename(path))
         if os.path.exists(target) and os.path.getsize(target) == os.path.getsize(path):
             return False
         partial = target + '.partial'
@@ -129,13 +149,13 @@ def main():
     # Copying is bound by NAS latency, not by this machine, so the same
     # concurrency that made the survey quick applies here.
     copied = 0
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         for index, did in enumerate(pool.map(stage, sorted(needed)), 1):
             copied += bool(did)
             if index % 25 == 0:
                 print(f'  {index}/{len(needed)}', flush=True)
-    print(f'\nstaged {copied} new files into {args.dest}')
-    print(f'now run with: VAL_SPLIT={args.dest} bash scripts/server/run_val14.sh baseline')
+    print(f'\nstaged {copied} new files into {dest}')
+    print(f'now run with: VAL_SPLIT={dest} bash scripts/server/run_val14.sh baseline')
 
 
 if __name__ == '__main__':
