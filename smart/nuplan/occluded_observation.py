@@ -30,6 +30,7 @@ benchmark imposes rather than facts about the world:
   buffer propagated them to, keeping their original stale timestamp -- which is
   the honest thing for a measurement that is no longer fresh.
 """
+import random
 from typing import Optional, Sequence, Type
 
 import torch
@@ -80,6 +81,15 @@ class OccludedObservation(AbstractObservation):
             geometry; set it to model one deliberately.
         visibility_threshold: fraction of an object's extent that must be
             visible for it to count as seen. Zero means any sliver counts.
+        randomise: withhold the same *number* of objects the sight lines would
+            have hidden, but choose them uniformly at random. This is the
+            control, not a second benchmark: it removes exactly as much
+            information per frame, so anything the occluded condition does that
+            this one does not is attributable to *which* objects go missing
+            rather than to how many. Without it, a planner that simply degrades
+            under any perturbation looks the same as one that is specifically
+            defeated by things hiding behind other things.
+        seed: makes the random choice reproducible.
     """
 
     def __init__(self,
@@ -89,12 +99,17 @@ class OccludedObservation(AbstractObservation):
                  memory_horizon: float = 3.0,
                  propagate: str = CONSTANT_VELOCITY,
                  radius: Optional[float] = None,
-                 visibility_threshold: float = 0.0):
+                 visibility_threshold: float = 0.0,
+                 randomise: bool = False,
+                 seed: int = 0):
         self._observation = observation
         self._scenario = scenario
         self._occluder_types = set(occluder_types)
         self._radius = radius
         self._visibility_threshold = visibility_threshold
+        self._randomise = randomise
+        self._random = random.Random(seed)
+        self._seed = seed
         self._buffer = TrackingBuffer(memory_horizon=memory_horizon, propagate=propagate)
         self._ego_state = None
         self._time_s = 0.0
@@ -117,6 +132,9 @@ class OccludedObservation(AbstractObservation):
         """Inherited, see superclass."""
         self._observation.reset()
         self._buffer.reset()
+        # Reseed so a scenario draws the same sequence however many scenarios
+        # ran before it, which keeps a rerun of one scenario reproducible.
+        self._random = random.Random(self._seed)
         self._ego_state = None
         self._time_s = 0.0
         self._last_seen = {}
@@ -161,9 +179,19 @@ class OccludedObservation(AbstractObservation):
                                   for o in objects]) & within
         fraction = agent_visibility(origin, boxes, occluder_mask=occluders)
 
+        hidden = [i for i in range(len(objects))
+                  if within[i] and fraction[i] <= self._visibility_threshold]
+        if self._randomise:
+            # Same count, different choice. Drawing from the in-range objects
+            # keeps the two conditions comparable: occlusion never withholds
+            # something out of range either.
+            candidates = [i for i in range(len(objects)) if within[i]]
+            hidden = self._random.sample(candidates, min(len(hidden), len(candidates)))
+        withheld = set(hidden)
+
         seen = []
         for i, tracked_object in enumerate(objects):
-            if not within[i] or fraction[i] <= self._visibility_threshold:
+            if not within[i] or i in withheld:
                 continue
             track_id = _track_id(tracked_object)
             self._last_seen[track_id] = tracked_object

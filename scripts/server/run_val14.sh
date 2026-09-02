@@ -125,15 +125,20 @@ case "$REACTIVITY" in
     *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive)" >&2; exit 1 ;;
 esac
 
-if [ "$MODE" = "occluded" ]; then
-    # The occluded observation has to wrap whatever the challenge uses, or the
-    # reactive condition silently reverts to log replay.
-    OBSERVATION="observation=$OCCLUDED_OBS"
-    TAG=occluded
-else
-    OBSERVATION=""
-    TAG=baseline
-fi
+case "$MODE" in
+    occluded)
+        # The occluded observation has to wrap whatever the challenge uses, or
+        # the reactive condition silently reverts to log replay.
+        OBSERVATION="observation=$OCCLUDED_OBS"; TAG=occluded ;;
+    random)
+        # Control: same number of objects withheld per frame, chosen at random
+        # rather than by sight line. Only meaningful against an occluded run
+        # over the same scenarios.
+        OBSERVATION="observation=random_withholding_observation"; TAG=random ;;
+    baseline)
+        OBSERVATION=""; TAG=baseline ;;
+    *) echo "unknown mode '$MODE' (baseline | occluded | random)" >&2; exit 1 ;;
+esac
 
 echo "split $SPLIT   $REACTIVITY   $TAG"
 

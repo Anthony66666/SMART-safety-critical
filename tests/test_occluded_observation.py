@@ -203,3 +203,57 @@ def test_output_is_always_a_subset_of_the_input():
         given = set(ids(occluded.get_observation()))
         assert given <= {o.track_token for o in objects}
         step(occluded, time_s + 0.1, ego_at(0.0, 0.0, time_s + 0.1))
+
+
+def _count(detections):
+    return len(list(detections.tracked_objects))
+
+
+def test_randomised_control_withholds_the_same_number():
+    """The control's whole purpose is to remove as much and no more.
+
+    If it withheld a different amount, a difference between the conditions
+    could be explained by information volume rather than by which objects went
+    missing, and the control would prove nothing.
+    """
+    blocker = agent('blocker', 10.0, 0.0)
+    hidden = agent('hidden', 20.0, 0.0)
+    hidden2 = agent('hidden2', 30.0, 0.0)
+    clear = agent('clear', 0.0, 20.0)
+    objects = [blocker, hidden, hidden2, clear]
+
+    _, occluded = make(objects, memory_horizon=0.0)
+    _, randomised = make(objects, memory_horizon=0.0, randomise=True, seed=1)
+
+    assert _count(occluded.get_observation()) == _count(randomised.get_observation())
+
+
+def test_randomised_control_stays_a_subset():
+    objects = [agent('a', 10.0, 0.0), agent('b', 20.0, 0.0),
+               agent('c', 30.0, 0.0), agent('d', 0.0, 15.0)]
+    _, randomised = make(objects, memory_horizon=0.0, randomise=True, seed=3)
+    given = set(ids(randomised.get_observation()))
+    assert given <= {o.track_token for o in objects}
+
+
+def test_randomised_control_is_reproducible():
+    objects = [agent(f'a{i}', 10.0 + 6 * i, 0.0) for i in range(6)]
+    _, first = make(objects, memory_horizon=0.0, randomise=True, seed=7)
+    _, second = make(objects, memory_horizon=0.0, randomise=True, seed=7)
+    assert ids(first.get_observation()) == ids(second.get_observation())
+
+
+def test_randomised_control_differs_from_the_sight_lines():
+    """Over enough objects the two should disagree about who is missing.
+
+    Identical output would mean the control is not controlling for anything.
+    """
+    objects = [agent(f'a{i}', 10.0 + 6 * i, 0.0) for i in range(8)]
+    _, occluded = make(objects, memory_horizon=0.0)
+    disagreed = False
+    for seed in range(8):
+        _, randomised = make(objects, memory_horizon=0.0, randomise=True, seed=seed)
+        if ids(occluded.get_observation()) != ids(randomised.get_observation()):
+            disagreed = True
+            break
+    assert disagreed

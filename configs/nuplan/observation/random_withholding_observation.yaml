@@ -1,0 +1,25 @@
+# The control for the occluded condition: same information removed, chosen at
+# random instead of by sight line.
+#
+# Three val14 scenarios fell from a perfect score to zero under occlusion, and
+# each struck a vehicle that had been handed to the planner -- so occlusion
+# changed an earlier decision, the trajectory drifted a metre or two, and the
+# ego arrived somewhere bad. That leaves two readings: occlusion causing it, or
+# a planner that any perturbation of that size would upset.
+#
+# This separates them. It withholds exactly as many objects per frame as the
+# sight lines would have, but picks them uniformly at random, so the two runs
+# differ only in *which* objects go missing. If the damage is the same, the
+# planner is simply fragile and occlusion deserves no particular credit; if the
+# occluded run is worse, the geometry is what matters.
+_target_: smart.nuplan.occluded_observation.build_occluded_observation
+_convert_: 'all'
+_recursive_: false
+
+observation:
+  _target_: nuplan.planning.simulation.observation.tracks_observation.TracksObservation
+  _convert_: 'all'
+
+memory_horizon: 0.0
+randomise: true
+seed: 0
