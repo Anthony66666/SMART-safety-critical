@@ -29,8 +29,12 @@ cd "$RAW"
 unzip -q -o "$ZIP"
 
 echo "=== 4. what landed ==="
-ls -d "$RAW"/nuplan-v1.1/splits/* 2>/dev/null
-for d in "$RAW"/nuplan-v1.1/splits/*/; do
-    printf '  %-12s %s db files\n' "$(basename "$d")" "$(ls "$d"/*.db 2>/dev/null | wc -l)"
+# The test archive unpacks to data/cache/test, the same convention the mini
+# download uses -- not the nuplan-v1.1/splits layout the existing val split
+# sits in, which this NAS's download script had rearranged. Report whichever
+# directories actually appeared rather than assuming either.
+for d in "$RAW"/data/cache/*/ "$RAW"/nuplan-v1.1/splits/*/; do
+    [ -d "$d" ] || continue
+    printf '  %-46s %s db files\n' "$d" "$(ls "$d"/*.db 2>/dev/null | wc -l)"
 done
 echo "done"
