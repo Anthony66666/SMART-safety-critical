@@ -217,11 +217,46 @@ OmegaConf.save(config, out)
 CFGEOF
 echo "cfg_weight $CFG_WEIGHT  ->  $(basename "$RESOLVED")"
 
+# PLANNER picks what is being evaluated. The benchmark needs contrast across
+# paradigms more than it needs every planner in the table:
+#   idm         rule-based, consults only its lead vehicle -- structurally
+#               immune to occlusion, and measured at exactly zero gap
+#   pdm_closed  rule-based but reasons over the whole scene; the nuPlan
+#               challenge winner. Deterministic, so it needs no seeding, and
+#               purely rule-based, so it needs no checkpoint
+#   flow        learned
+# If pdm_closed also loses points, the finding stops being about one learned
+# planner and becomes about planners that use the wider scene.
+PLANNER=${PLANNER:-flow}
+EXTRA_SEARCHPATH=""
+
+case "$PLANNER" in
+  idm)
+    PLANNER_ARG="planner=idm_planner"
+    echo "planner: IDM (devkit)"
+    ;;
+  pdm_closed)
+    PLANNER_ARG="planner=pdm_closed_planner"
+    # tuplan_garage keeps its planner configs in its own package.
+    EXTRA_SEARCHPATH="pkg://tuplan_garage.planning.script.config.common, \
+        pkg://tuplan_garage.planning.script.config.simulation, "
+    echo "planner: PDM-Closed (tuplan_garage, rule-based, no checkpoint)"
+    ;;
+  flow)
+    :
+    ;;
+  *)
+    echo "unknown PLANNER '$PLANNER' (idm | pdm_closed | flow)" >&2; exit 1 ;;
+esac
+
 # SEED pins Flow Planner's sampling noise to the simulation step. Without it
 # two identical runs disagree on 621 of 1118 scenarios and 0.78 points, which
 # is the same size as the effect being measured. Unset SEED to reproduce the
-# original unpinned behaviour.
-if [ -n "${SEED:-}" ]; then
+# original unpinned behaviour. Only Flow Planner samples; the rule-based
+# planners are deterministic already.
+if [ "$PLANNER" != "flow" ]; then
+    :
+elif [ -n "${SEED:-}" ]; then
     PLANNER_ARG="planner=seeded_flow_planner \
         planner.seeded_flow_planner.seed=$SEED \
         planner.seeded_flow_planner.planner.config_path=$RESOLVED \
@@ -254,7 +289,7 @@ $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     scenario_builder.map_root="$MAPS" \
     scenario_filter=$SPLIT \
     $LIMIT_ARG \
-    experiment_uid="flow_planner/$SPLIT/$REACTIVITY/$TAG/$(date +%Y-%m-%d-%H-%M-%S)" \
+    experiment_uid="$PLANNER/$SPLIT/$REACTIVITY/$TAG/$(date +%Y-%m-%d-%H-%M-%S)" \
     worker=$WORKER \
     distributed_mode=SINGLE_NODE \
     $THREADS_ARG \
@@ -262,6 +297,7 @@ $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     enable_simulation_progress_bar=true \
     verbose=false \
     hydra.searchpath="[file://$BENCH/configs/nuplan, \
+    $EXTRA_SEARCHPATH \
 pkg://flow_planner.nuplan_simulation.scenario_filter, \
 pkg://flow_planner.nuplan_simulation, \
 pkg://nuplan.planning.script.config.common, \
