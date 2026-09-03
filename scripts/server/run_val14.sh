@@ -278,6 +278,32 @@ case "$PLANNER" in
         pkg://tuplan_garage.planning.script.config.simulation, "
     echo "planner: $PLANNER (ml_planner + $MODEL)"
     ;;
+  dtpp)
+    # DTPP's repository is a flat set of top-level modules rather than a
+    # package, so its checkout has to be on PYTHONPATH for `planner.Planner`
+    # to resolve and for torch.load to unpickle the model's classes. Its
+    # checkpoint ships inside the repository.
+    DTPP_ROOT=${DTPP_ROOT:-$WORK/DTPP}
+    export PYTHONPATH="$DTPP_ROOT:$PYTHONPATH"
+    PLANNER_ARG="planner=dtpp_planner \
+        planner.dtpp_planner.model_path=$DTPP_ROOT/base_model.pth"
+    echo "planner: DTPP (tree policy planning)"
+    ;;
+  carl)
+    # The only RL entry in the table, and the only one that needs a different
+    # simulation config: it emits control actions rather than a trajectory, so
+    # it runs under one_stage_controller instead of two_stage_controller. That
+    # makes its absolute score incomparable with the other planners -- but the
+    # gap is not, since both of its conditions use the same controller.
+    CARL_ROOT=${CARL_ROOT:-$WORK/CaRL/nuPlan}
+    CHALLENGE="${CHALLENGE}_action"
+    PLANNER_ARG="planner=ppo_planner \
+        planner.ppo_planner.checkpoint_path=$CARL_ROOT/checkpoints/${CARL_CKPT:-nuplan_51892_1B}/model_best.pth"
+    EXTRA_SEARCHPATH="pkg://carl_nuplan.planning.script.config.common, \
+        pkg://carl_nuplan.planning.script.config.simulation, \
+        pkg://carl_nuplan.planning.script.experiments, "
+    echo "planner: CaRL / PPO (one_stage_controller -- absolute score not comparable)"
+    ;;
   diffusion)
     # Same lab as Flow Planner and its direct predecessor, so the two are not
     # independent samples -- but it is the only strong learned planner whose
@@ -296,7 +322,8 @@ case "$PLANNER" in
   *)
     echo "unknown PLANNER '$PLANNER'" >&2
     echo "  rule-based : idm | pdm_closed" >&2
-    echo "  hybrid     : pdm_hybrid" >&2
+    echo "  hybrid     : pdm_hybrid | dtpp" >&2
+    echo "  RL         : carl" >&2
     echo "  learned    : pdm_open | urban_driver | gc_pgp | plancnn | diffusion | flow" >&2
     exit 1 ;;
 esac

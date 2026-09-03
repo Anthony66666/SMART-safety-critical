@@ -1,0 +1,17 @@
+# DTPP: tree-structured policy planning, the hybrid entry from the table.
+#
+# Its repository is a flat set of top-level modules rather than a package --
+# planner.py imports `from planner_utils import *` and friends -- so the DTPP
+# checkout has to be on PYTHONPATH for `planner.Planner` to resolve, and for
+# torch.load to find the classes it unpickles. The bare module name `planner`
+# is unusual but does not collide with nuplan's, which is namespaced.
+#
+# The checkpoint ships inside the repository (base_model.pth, 22.8 MB,
+# Apache-2.0), so unlike PLUTO and PlanTF there is nothing to download and
+# nothing to go missing.
+dtpp_planner:
+  _target_: planner.Planner
+  _convert_: 'all'
+
+  model_path: ???
+  device: cuda

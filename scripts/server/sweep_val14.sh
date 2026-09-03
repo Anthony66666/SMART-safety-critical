@@ -23,7 +23,7 @@ mkdir -p "$LOGS"
 
 # Rule-based first: they are quick, need no GPU, and a failure there means the
 # harness is wrong rather than the planner.
-PLANNERS=${PLANNERS:-"idm pdm_closed pdm_hybrid pdm_open urban_driver gc_pgp plancnn diffusion flow"}
+PLANNERS=${PLANNERS:-"idm pdm_closed pdm_hybrid dtpp pdm_open urban_driver gc_pgp plancnn diffusion flow carl"}
 REACTIVITIES=${REACTIVITIES:-"nonreactive reactive"}
 MODES=${MODES:-"baseline occluded"}
 # Card 3 by default: the emptiest on this box, and card 0 is usually taken.
