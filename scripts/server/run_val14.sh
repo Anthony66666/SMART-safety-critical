@@ -196,6 +196,27 @@ else
     echo "not writing per-frame simulation logs; set KEEP_LOGS=1 if you need them"
 fi
 
+# Classifier-free guidance. The published model_config sets cfg_weight: 1.0,
+# which the guidance formula u = (1-w)*u_uncond + w*u_cond turns into plain
+# u_cond -- guidance off, as the config's own comment says. The paper reports
+# 90.43 at 1.8, so the shipped default evaluates a weakened planner.
+#
+# It has to be set on the model config, not on FlowPlanner: flow_ode.generate
+# takes no cfg_weight parameter, so the planner's argument falls into **kwargs
+# and never reaches VelocityModel. Verified by measurement -- same seed, only
+# model.cfg_weight changed, trajectories 2.26 m apart.
+CFG_WEIGHT=${CFG_WEIGHT:-1.8}
+RESOLVED="$WORK/checkpoints/model_config_cfg${CFG_WEIGHT}.yaml"
+$PY - "$WORK" "$CFG_WEIGHT" "$RESOLVED" <<'CFGEOF'
+import sys
+from omegaconf import OmegaConf
+work, weight, out = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+config = OmegaConf.load(f'{work}/checkpoints/model_config_resolved.yaml')
+config.model.cfg_weight = weight
+OmegaConf.save(config, out)
+CFGEOF
+echo "cfg_weight $CFG_WEIGHT  ->  $(basename "$RESOLVED")"
+
 # SEED pins Flow Planner's sampling noise to the simulation step. Without it
 # two identical runs disagree on 621 of 1118 scenarios and 0.78 points, which
 # is the same size as the effect being measured. Unset SEED to reproduce the
@@ -203,12 +224,12 @@ fi
 if [ -n "${SEED:-}" ]; then
     PLANNER_ARG="planner=seeded_flow_planner \
         planner.seeded_flow_planner.seed=$SEED \
-        planner.seeded_flow_planner.planner.config_path=$WORK/checkpoints/model_config_resolved.yaml \
+        planner.seeded_flow_planner.planner.config_path=$RESOLVED \
         planner.seeded_flow_planner.planner.ckpt_path=$WORK/checkpoints/model.pth"
     echo "seeded planner, seed=$SEED"
 else
     PLANNER_ARG="planner=flow_planner \
-        planner.flow_planner.config_path=$WORK/checkpoints/model_config_resolved.yaml \
+        planner.flow_planner.config_path=$RESOLVED \
         planner.flow_planner.ckpt_path=$WORK/checkpoints/model.pth \
         +planner.flow_planner.enable_ema=false"
     echo "UNSEEDED planner -- results will not reproduce; set SEED=0 to pin them"
