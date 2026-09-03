@@ -26,6 +26,16 @@ mkdir -p "$LOGS"
 PLANNERS=${PLANNERS:-"idm pdm_closed pdm_hybrid pdm_open urban_driver gc_pgp plancnn diffusion flow"}
 REACTIVITIES=${REACTIVITIES:-"nonreactive reactive"}
 MODES=${MODES:-"baseline occluded"}
+# Pick the emptiest card rather than defaulting to 0, which on this shared box
+# is usually the busy one. run_val14.sh still refuses to start below 8 GB free,
+# so a wrong choice fails loudly instead of dying as CUDA OOM inside ray
+# workers -- which once cost 1089 of 1118 simulations and produced a score that
+# looked entirely reasonable.
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ] && command -v nvidia-smi >/dev/null; then
+    CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.free \
+        --format=csv,noheader,nounits | sort -t, -k2 -rn | head -1 | cut -d, -f1)
+    echo "picked gpu $CUDA_VISIBLE_DEVICES (most free memory)"
+fi
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
 echo "planners     : $PLANNERS"
