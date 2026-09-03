@@ -245,11 +245,23 @@ case "$PLANNER" in
         pkg://tuplan_garage.planning.script.config.simulation, "
     echo "planner: PDM-Closed (tuplan_garage, rule-based, no checkpoint)"
     ;;
+  diffusion)
+    # Same lab as Flow Planner and its direct predecessor, so the two are not
+    # independent samples -- but it is the only strong learned planner whose
+    # weights are still obtainable. PLUTO's and PlanTF's are 404 on the
+    # authors' OneDrive.
+    PLANNER_ARG="planner=seeded_diffusion_planner \
+        planner.seeded_diffusion_planner.seed=${SEED:-0} \
+        planner.seeded_diffusion_planner.planner.config.args_file=$WORK/checkpoints/diffusion/args.json \
+        planner.seeded_diffusion_planner.planner.ckpt_path=$WORK/checkpoints/diffusion/model.pth"
+    EXTRA_SEARCHPATH="pkg://diffusion_planner.config, "
+    echo "planner: Diffusion Planner, seed=${SEED:-0}"
+    ;;
   flow)
     :
     ;;
   *)
-    echo "unknown PLANNER '$PLANNER' (idm | pdm_closed | flow)" >&2; exit 1 ;;
+    echo "unknown PLANNER '$PLANNER' (idm | pdm_closed | flow | diffusion)" >&2; exit 1 ;;
 esac
 
 # SEED pins Flow Planner's sampling noise to the simulation step. Without it
@@ -257,7 +269,7 @@ esac
 # is the same size as the effect being measured. Unset SEED to reproduce the
 # original unpinned behaviour. Only Flow Planner samples; the rule-based
 # planners are deterministic already.
-if [ "$PLANNER" != "flow" ]; then
+if [ "$PLANNER" != "flow" ]; then   # non-flow planners set PLANNER_ARG above
     :
 elif [ -n "${SEED:-}" ]; then
     PLANNER_ARG="planner=seeded_flow_planner \

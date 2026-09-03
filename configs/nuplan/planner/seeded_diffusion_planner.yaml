@@ -1,0 +1,44 @@
+# Diffusion Planner with its sampling noise pinned to the simulation step.
+#
+# decoder.py draws `torch.randn(B, P, future_len, 4)` at inference, so like
+# Flow Planner it gives a different trajectory on every call. Flow Planner's
+# unpinned noise moved 621 of 1118 val14 scenarios and 0.78 points between two
+# identical runs, which is the size of the effect being measured, so this one
+# is pinned from the start rather than after the fact.
+#
+# Unlike Flow Planner, the published checkpoint here is a full training
+# checkpoint carrying both `model` and `ema_state_dict`, so enable_ema keeps
+# its default of true and the EMA weights are what gets loaded -- which is
+# presumably what the paper reports.
+seeded_diffusion_planner:
+  _target_: smart.nuplan.seeded_planner.SeededPlanner
+  _convert_: 'all'
+  _recursive_: false
+
+  seed: 0
+
+  planner:
+    _target_: diffusion_planner.planner.planner.DiffusionPlanner
+    _convert_: "all"
+
+    config:
+      _target_: diffusion_planner.utils.config.Config
+      _convert_: "all"
+      args_file: ???
+      guidance_fn: null
+
+    ckpt_path: ???
+
+    past_trajectory_sampling:
+      _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+      _convert_: "all"
+      num_poses: 20
+      time_horizon: 2
+
+    future_trajectory_sampling:
+      _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+      _convert_: "all"
+      num_poses: 80
+      time_horizon: 8
+
+    device: cuda
