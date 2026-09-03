@@ -237,6 +237,9 @@ case "$PLANNER" in
     ;;
   pdm_closed)
     PLANNER_ARG="planner=pdm_closed_planner"
+    # Rule-based and CPU-only, so reserving GPU for it just caps concurrency
+    # on a machine whose bottleneck is cores.
+    GPU_FRACTION=${GPU_FRACTION:-0}
     # tuplan_garage keeps its planner configs in its own package.
     EXTRA_SEARCHPATH="pkg://tuplan_garage.planning.script.config.common, \
         pkg://tuplan_garage.planning.script.config.simulation, "
