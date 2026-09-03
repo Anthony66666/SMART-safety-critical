@@ -245,6 +245,39 @@ case "$PLANNER" in
         pkg://tuplan_garage.planning.script.config.simulation, "
     echo "planner: PDM-Closed (tuplan_garage, rule-based, no checkpoint)"
     ;;
+  pdm_hybrid)
+    PLANNER_ARG="planner=pdm_hybrid_planner \
+        planner.pdm_hybrid_planner.checkpoint_path=$WORK/checkpoints/tuplan/pdm_offset_checkpoint.ckpt"
+    EXTRA_SEARCHPATH="pkg://tuplan_garage.planning.script.config.common, \
+        pkg://tuplan_garage.planning.script.config.simulation, "
+    echo "planner: PDM-Hybrid (tuplan_garage)"
+    ;;
+  pdm_open)
+    PLANNER_ARG="planner=pdm_open_planner \
+        planner.pdm_open_planner.checkpoint_path=$WORK/checkpoints/tuplan/pdm_open_checkpoint.ckpt"
+    EXTRA_SEARCHPATH="pkg://tuplan_garage.planning.script.config.common, \
+        pkg://tuplan_garage.planning.script.config.simulation, "
+    echo "planner: PDM-Open (tuplan_garage)"
+    ;;
+  urban_driver|gc_pgp|plancnn)
+    # These three run through the devkit's generic ml_planner, differing only
+    # in which model config and checkpoint they are handed. raster_model and
+    # urban_driver_open_loop_model are the devkit's own; gc_pgp_model comes
+    # from tuplan_garage.
+    case "$PLANNER" in
+      urban_driver) MODEL=urban_driver_open_loop_model; CKPT=urbandriver_checkpoint.ckpt; EXTRA="" ;;
+      gc_pgp)       MODEL=gc_pgp_model;                 CKPT=gc_pgp_checkpoint.ckpt
+                    EXTRA="model.aggregator.pre_train=false" ;;
+      plancnn)      MODEL=raster_model;                 CKPT=plancnn_checkpoint.ckpt; EXTRA="" ;;
+    esac
+    PLANNER_ARG="planner=ml_planner \
+        planner.ml_planner.model_config=\${model} \
+        planner.ml_planner.checkpoint_path=$WORK/checkpoints/tuplan/$CKPT \
+        model=$MODEL $EXTRA"
+    EXTRA_SEARCHPATH="pkg://tuplan_garage.planning.script.config.common, \
+        pkg://tuplan_garage.planning.script.config.simulation, "
+    echo "planner: $PLANNER (ml_planner + $MODEL)"
+    ;;
   diffusion)
     # Same lab as Flow Planner and its direct predecessor, so the two are not
     # independent samples -- but it is the only strong learned planner whose
@@ -261,7 +294,11 @@ case "$PLANNER" in
     :
     ;;
   *)
-    echo "unknown PLANNER '$PLANNER' (idm | pdm_closed | flow | diffusion)" >&2; exit 1 ;;
+    echo "unknown PLANNER '$PLANNER'" >&2
+    echo "  rule-based : idm | pdm_closed" >&2
+    echo "  hybrid     : pdm_hybrid" >&2
+    echo "  learned    : pdm_open | urban_driver | gc_pgp | plancnn | diffusion | flow" >&2
+    exit 1 ;;
 esac
 
 # SEED pins Flow Planner's sampling noise to the simulation step. Without it

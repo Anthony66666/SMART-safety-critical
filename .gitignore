@@ -141,3 +141,5 @@ data/nuplan_mini/
 
 data/nuplan_converted/
 nuplan_zeroshot.png
+checkpoints/tuplan/
+checkpoints/diffusion_planner/
