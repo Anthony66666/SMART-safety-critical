@@ -122,9 +122,18 @@ class OccludedObservation(AbstractObservation):
         return DetectionsTracks
 
     def initialize(self) -> None:
-        """Inherited, see superclass."""
-        self._observation.initialize()
+        """Inherited, see superclass.
+
+        Reset first, then initialise. The other order looks equivalent and is
+        not: reset() forwards to the wrapped observation, so initialising it
+        first and resetting afterwards throws away whatever state it just
+        built. Log replay and IDM survive that because they hold none, but a
+        learned traffic model builds its history buffer in initialize() and
+        comes out of it empty -- the traffic then stands still for the whole
+        scenario, with nothing raised anywhere.
+        """
         self.reset()
+        self._observation.initialize()
         self._ego_state = self._scenario.get_ego_state_at_iteration(0)
         self._time_s = self._ego_state.time_point.time_s
 

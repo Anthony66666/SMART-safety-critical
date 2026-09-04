@@ -257,3 +257,31 @@ def test_randomised_control_differs_from_the_sight_lines():
             disagreed = True
             break
     assert disagreed
+
+
+def test_initialize_does_not_wipe_the_wrapped_observations_state():
+    """reset() forwards, so initialising the inner one first loses its state.
+
+    Log replay and IDM hold no state across initialize() and never noticed.
+    A learned traffic model builds its history buffer there, and the old
+    ordering left it empty -- the traffic stood still for the whole scenario
+    and nothing raised. The wrapper must reset before it initialises.
+    """
+
+    class StatefulObservation(FakeObservation):
+        def __init__(self, objects):
+            super().__init__(objects)
+            self.history = []
+
+        def initialize(self):
+            super().initialize()
+            self.history = ['seeded']
+
+        def reset(self):
+            self.history = []
+
+    wrapped = StatefulObservation([agent('a', 10.0, 0.0)])
+    occluded = OccludedObservation(wrapped, scenario_with_ego(ego_at()))
+    occluded.initialize()
+    assert wrapped.history == ['seeded']
+    assert wrapped.initialized
