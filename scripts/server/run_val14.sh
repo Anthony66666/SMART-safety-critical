@@ -115,14 +115,26 @@ case "$SPLIT" in
     *) echo "unknown SPLIT '$SPLIT' (val14 | test14-hard | test14-random)" >&2; exit 1 ;;
 esac
 
-# REACTIVITY picks nuPlan's own challenge. Non-reactive replays the log;
-# reactive drives the background traffic with IDM. They are scored by different
-# aggregators and published as separate columns, so they are separate runs.
+# REACTIVITY picks what drives the background traffic. Non-reactive replays the
+# log and reactive uses IDM; both are nuPlan's own challenges, scored by
+# different aggregators and published as separate columns, so they are separate
+# runs. `smart` is ours: a learned traffic model in place of IDM, scored by the
+# reactive aggregator because that is the challenge it is standing in for.
+#
+# BASE_OBS is what the challenge would use on its own. It is empty for the two
+# official ones because the challenge config already selects them, and set for
+# smart because nothing else would -- leaving it empty there silently reverts
+# to log replay and produces a plausible set of numbers for the wrong thing.
 REACTIVITY=${REACTIVITY:-nonreactive}
 case "$REACTIVITY" in
-    nonreactive) CHALLENGE=closed_loop_nonreactive_agents; OCCLUDED_OBS=occluded_box_observation ;;
-    reactive)    CHALLENGE=closed_loop_reactive_agents;    OCCLUDED_OBS=occluded_idm_agents_observation ;;
-    *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive)" >&2; exit 1 ;;
+    nonreactive) CHALLENGE=closed_loop_nonreactive_agents
+                 BASE_OBS=""; OCCLUDED_OBS=occluded_box_observation ;;
+    reactive)    CHALLENGE=closed_loop_reactive_agents
+                 BASE_OBS=""; OCCLUDED_OBS=occluded_idm_agents_observation ;;
+    smart)       CHALLENGE=closed_loop_reactive_agents
+                 BASE_OBS=smart_agents_observation
+                 OCCLUDED_OBS=occluded_smart_agents_observation ;;
+    *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive | smart)" >&2; exit 1 ;;
 esac
 
 case "$MODE" in
@@ -134,9 +146,12 @@ case "$MODE" in
         # Control: same number of objects withheld per frame, chosen at random
         # rather than by sight line. Only meaningful against an occluded run
         # over the same scenarios.
+        if [ "$REACTIVITY" = smart ]; then
+            echo "random control is not wired for smart traffic yet" >&2; exit 1
+        fi
         OBSERVATION="observation=random_withholding_observation"; TAG=random ;;
     baseline)
-        OBSERVATION=""; TAG=baseline ;;
+        OBSERVATION=${BASE_OBS:+observation=$BASE_OBS}; TAG=baseline ;;
     *) echo "unknown mode '$MODE' (baseline | occluded | random)" >&2; exit 1 ;;
 esac
 
