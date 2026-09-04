@@ -75,7 +75,8 @@ NUPLAN_STRIDE = 2
 
 def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
                      map_radius=150.0, include_boundaries=True,
-                     point_spacing=MAP_POINT_SPACING):
+                     point_spacing=MAP_POINT_SPACING,
+                     merge_lane_boundaries=False):
     """Convert one nuPlan scenario into the dict SMART's preprocessing expects.
 
     Args:
@@ -89,6 +90,9 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
         point_spacing: metres between consecutive map points. See _polyline --
             nuPlan's native density is four times finer than SMART expects,
             which costs memory rather than accuracy.
+        merge_lane_boundaries: emit one polygon per lane holding its boundaries
+            and centreline, as the nuPlan checkpoint expects, instead of WOMD's
+            separate polygons. See _convert_map.
 
     Returns:
         A dict with the keys TokenProcessor.preprocess reads.
@@ -97,7 +101,8 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
     centre = agent['position'][agent['av_index'], WOMD_CURRENT_STEP, :2]
     origin = (float(centre[0]), float(centre[1]))
     map_data = _convert_map(scenario, Point2D(*origin), map_radius,
-                            include_boundaries, origin, point_spacing)
+                            include_boundaries, origin, point_spacing,
+                            merge_lane_boundaries)
 
     # Everything above is in global UTM and float64. Casting UTM straight to
     # float32 is what silently ruins this conversion: a northing near 4e6 has a
@@ -115,6 +120,14 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
     # interpolates from it, so a non-zero invalid slot does not fail loudly: it
     # feeds the tokenizer nonsense and the contamination spreads to agents that
     # were fine.
+    #
+    # Recentring does put the ego at exactly that sentinel coordinate, so every
+    # invalid slot sits in the ego's own footprint. That looked like an obvious
+    # defect and it is not one: holding the scene at a 10 km offset, so zero is
+    # unambiguous again, measured 6.48% against 6.60% next-token top-1. The
+    # earlier reading that suggested otherwise came from parking invalid slots
+    # at a non-zero coordinate, which fires the interpolation branch above --
+    # a different change wearing the same clothes.
     agent['position'][~agent['valid_mask']] = 0.0
 
     for key in ('position', 'heading', 'velocity', 'shape'):
@@ -260,8 +273,24 @@ def _traffic_lights(scenario):
 
 
 def _convert_map(scenario, centre, radius, include_boundaries, origin,
-                 point_spacing=MAP_POINT_SPACING):
-    """Lanes, their boundaries and crosswalks as typed polygons of points."""
+                 point_spacing=MAP_POINT_SPACING, merge_lane_boundaries=False):
+    """Lanes, their boundaries and crosswalks as typed polygons of points.
+
+    `merge_lane_boundaries` selects which of two incompatible map shapes to
+    emit, and it has to match the checkpoint. WOMD gives every road edge and
+    road line its own polygon alongside the lanes, which is what the original
+    SMART checkpoint saw and what this emits by default. The Argoverse shape the
+    nuPlan checkpoint was trained through instead puts a lane's left boundary,
+    right boundary and centreline in a single polygon.
+
+    `tokenize_map` groups points per polygon and splits them by type within it,
+    so the shape decides what a map token covers and which polylines share a
+    traffic light -- which made this the leading suspect for the large gap
+    against their conversion. It is not the cause: merging measured 6.53%
+    against 6.60% next-token top-1 over eight scenarios, and 6.70% with the
+    boundary thinning as well. Kept off by default, and kept at all only
+    because matching their shape exactly is worth being able to do.
+    """
     map_api = scenario.map_api
     layers = [SemanticMapLayer.LANE, SemanticMapLayer.LANE_CONNECTOR,
               SemanticMapLayer.CROSSWALK]
@@ -272,36 +301,50 @@ def _convert_map(scenario, centre, radius, include_boundaries, origin,
     positions, orientations, magnitudes, heights, point_type = [], [], [], [], []
     lane_index = {}
 
-    def add(points, pt_type, pl_type, light=LIGHT_UNKNOWN):
-        line = _polyline(points, point_spacing)
-        if line is None:
+    def add(parts, pl_type, light=LIGHT_UNKNOWN):
+        """One polygon from one or more polylines, given as (line, point type)."""
+        parts = [(line, kind) for line, kind in parts if line is not None]
+        if not parts:
             return None
-        xy, orientation, magnitude, rise = line
         index = len(polygon_type)
         polygon_type.append(pl_type)
         polygon_light.append(light)
-        positions.append(xy)
-        orientations.append(orientation)
-        magnitudes.append(magnitude)
-        heights.append(rise)
-        point_type.append(torch.full((len(xy),), pt_type, dtype=torch.uint8))
+        positions.append(torch.cat([line[0] for line, _ in parts]))
+        orientations.append(torch.cat([line[1] for line, _ in parts]))
+        magnitudes.append(torch.cat([line[2] for line, _ in parts]))
+        heights.append(torch.cat([line[3] for line, _ in parts]))
+        point_type.append(torch.cat([
+            torch.full((len(line[0]),), kind, dtype=torch.uint8) for line, kind in parts]))
         return index
+
+    def line(points):
+        return _polyline(points, point_spacing)
 
     lanes = (nearby.get(SemanticMapLayer.LANE, [])
              + nearby.get(SemanticMapLayer.LANE_CONNECTOR, []))
     for lane in lanes:
-        light = lights.get(lane.id, LIGHT_UNKNOWN)
-        index = add(lane.baseline_path.discrete_path, PT_CENTERLINE,
-                    POLYGON_VEHICLE, light)
-        if index is None:
+        centreline = line(lane.baseline_path.discrete_path)
+        if centreline is None:
             continue
-        lane_index[lane.id] = index
-        if include_boundaries:
-            for boundary in (lane.left_boundary, lane.right_boundary):
-                add(boundary.discrete_path, PT_EDGE, POLYGON_VEHICLE)
+        light = lights.get(lane.id, LIGHT_UNKNOWN)
+        boundaries = ([(line(lane.left_boundary.discrete_path), PT_EDGE),
+                       (line(lane.right_boundary.discrete_path), PT_EDGE)]
+                      if include_boundaries else [])
+        if merge_lane_boundaries:
+            # Boundaries first, centreline last, which is the order the
+            # Argoverse-shaped pipeline emits and therefore the order the
+            # nuPlan checkpoint was trained on.
+            lane_index[lane.id] = add(boundaries + [(centreline, PT_CENTERLINE)],
+                                      POLYGON_VEHICLE, light)
+        else:
+            lane_index[lane.id] = add([(centreline, PT_CENTERLINE)],
+                                      POLYGON_VEHICLE, light)
+            for boundary in boundaries:
+                add([boundary], POLYGON_VEHICLE)
 
     for crosswalk in nearby.get(SemanticMapLayer.CROSSWALK, []):
-        add(_polygon_outline(crosswalk.polygon), PT_CROSSWALK, POLYGON_PEDESTRIAN)
+        add([(line(_polygon_outline(crosswalk.polygon)), PT_CROSSWALK)],
+            POLYGON_PEDESTRIAN)
 
     if not polygon_type:
         raise ValueError('no map objects within the radius of the ego')
