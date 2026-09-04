@@ -7,8 +7,8 @@ embedding ranges. Whether the whole thing runs on real data is answered by
 scripts/nuplan_occlusion_check.py and by tokenizing a converted scenario, not
 by mocking a NuPlanScenario in full.
 """
-import torch
 import math
+import os
 
 import pytest
 import torch
@@ -27,6 +27,7 @@ from smart.nuplan.converter import (
     PT_CENTERLINE,
     PT_CROSSWALK,
     PT_EDGE,
+    WOMD_CURRENT_STEP,
     _lane_graph,
     _polyline,
 )
@@ -168,3 +169,41 @@ def test_nuplan_checkpoint_semantics_uses_the_rows_that_were_trained():
     assert out[('map_polygon', 'to', 'map_polygon')]['type'].tolist() == [0]
     # The original must survive: the WOMD-trained checkpoint still needs it.
     assert data['map_point']['type'].tolist() == [PT_CENTERLINE, PT_EDGE, PT_CROSSWALK]
+
+
+MINI_DATA = '/mnt/e/nuplan-mini/nuplan-v1.1_mini/data/cache/mini'
+MINI_MAPS = '/mnt/e/nuplan-mini/nuplan-maps-v1.0/maps'
+
+
+@pytest.mark.skipif(not os.path.isdir(MINI_DATA), reason='needs nuPlan mini')
+def test_recentre_false_leaves_the_scene_in_global_coordinates():
+    """The coordinate frame has to match the checkpoint, not the numerics.
+
+    Recentring is better conditioned -- UTM northings quantise to about half a
+    metre once they are cast to float32, which is what
+    test_utm_in_float32_loses_a_quarter_metre is about. It is still wrong for
+    the nuPlan-trained checkpoint, which was trained on data that was never
+    recentred: clean local coordinates are out of distribution for it and cost
+    7.49% against 23.62% next-token top-1 over 28 scenarios. Whichever frame is
+    chosen, the agents and the map have to be in the same one, which is the
+    part that would break silently.
+    """
+    from smart.nuplan.converter import convert_scenario
+    from smart.nuplan.scenarios import build_scenario, find_scenarios
+
+    entries = find_scenarios(MINI_DATA, 'traversing_intersection', 1, duration=12.0)
+    scenario = build_scenario(entries[0], MINI_DATA, MINI_MAPS, duration=12.0,
+                              scenario_type='traversing_intersection')
+    local = convert_scenario(scenario, recentre=True)
+    world = convert_scenario(scenario, recentre=False)
+
+    av = local['agent']['av_index']
+    assert abs(float(local['agent']['position'][av, WOMD_CURRENT_STEP, 0])) < 1.0
+    assert abs(float(world['agent']['position'][av, WOMD_CURRENT_STEP, 0])) > 1000.0
+    # The map must travel with the agents; a mismatch here puts every agent
+    # kilometres from its own lane and nothing raises.
+    assert float(world['map_point']['position'][:, 0].abs().min()) > 1000.0
+    assert float(local['map_point']['position'][:, 0].abs().min()) < 1000.0
+    # The reported origin stays the ego either way -- it is where the map query
+    # was centred, which is a separate question from the frame.
+    assert local['origin'] == world['origin']

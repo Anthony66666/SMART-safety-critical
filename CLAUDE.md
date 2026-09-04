@@ -88,38 +88,38 @@ python scripts/server/score.py ~/occlusion-bench/exp --by-type
 
 **ego_pose 存的是后轴不是车体中心**，Pacifica 差 1.461 m。
 
-**我们的转换器比 Bosch 的差 3.7 倍，问题在地图结构。** 同场景同 checkpoint、只换转换器，
-按真实 agent（排除背景物体，否则静止的锥桶白送准确率）算 next-token：
+**转换器的大问题是坐标重心化，不是地图。已修。** `convert_scenario(recentre=False)`，
+`SMARTAgents` 默认走这条。同场景同 checkpoint，按真实 agent 算 next-token（必须排除背景物体，
+否则静止的锥桶白送准确率）：
 
-| 转换器 | top-1 | top-10 |
+| | top-1 | top-10 |
 |---|---|---|
-| 我们的 | 6.36% | 28.00% |
-| Bosch 的 | **23.38%** | **74.47%** |
+| 重心化（改前） | 7.49% | 32.65% |
+| **全局 UTM（改后）** | **23.62%** | **70.69%** |
+| Bosch 全套 | 25.70% | 75.28% |
 
-12 个场景无一例外。**把他们的地图换进来、保留我们的 agent → 21.27%/70.63%，基本追平**，
-所以差距全在地图侧，agent 侧没问题。逐项排除后：
+28 个场景、两个 scenario_tag、21345 tokens，**28/28 全胜**。补回了 92% 的差距。
 
-- 地图半径 150→100：无影响
-- 不发车道边界：无影响
-- 只留当前帧存在的 agent：无影响
-- 点密度 0.25m→1m（63k→15k 点）：**无影响**（5.60%→5.68%），但省 4 倍内存，已改
-- 地图类型编号重映射：无影响（见下）
-- polygon 结构（一车道一 polygon，687→237）：**无影响**（6.53% vs 6.60%），已实现但默认关
-- 局部坐标系偏移 1 万米（让 0 不再落在 ego 上）：**无影响**（6.48% vs 6.60%），已撤回
+**为什么反直觉：** 重心化在数值上更好（UTM northing 在 float32 下量化到约 0.5 m），
+当初就是为这个加的。但 Bosch 的 checkpoint 就是在**没重心化、带着量化**的数据上训的，
+干净的局部坐标对它是分布外输入——这一项压过了数值条件。**坐标系要匹配 checkpoint，不是匹配数值。**
+WOMD 训的模型（`epoch=31`）用局部坐标是对的，所以 `recentre` 默认仍为 True。
 
-**"无效槽哨兵和 ego 撞了"这个结论是错的，别再捡起来。** SMART 用 `position == 0` 当"无效"哨兵，
-重心化后 ego 正好在 0，看起来是明显缺陷。但把整个场景偏移 1 万米让 0 变得无歧义，**没有任何提升**。
-之前测到的 5.60%→8.99% 来自把无效槽位设成 1e5——那会触发 `tokenize_agent` 里的
-`interplote_mask` 插值分支，是另一个改动穿了同一件衣服，不是哨兵修复。
+配套条件：`MAP_POINT_SPACING` 必须保持 1 米。nuPlan 原生 0.25 m 在 UTM 量级的 float32 下
+会让相邻点塌陷，`interplating_polyline` 直接抛异常。这才是那个稀疏化改动的真正价值。
 
-**所以 3.7 倍的差距目前仍未解释。** 已排除：地图半径、点密度、车道边界、agent 筛选、
-类型编号、polygon 结构、坐标系原点。地图整体换过去就能追平，说明确实在地图侧，
-但具体是哪一项还没找到。下次接手从这里开始，别重复上面这七项。
+**归因错过一次，值得记：** 中间做过"换他们的地图 → 21.27%"的实验，据此得出"差距在地图侧"。
+那个实验同时改了坐标系，我把增益全算到地图头上了。补上缺的对照格（我们的地图 + 全局 UTM）
+立刻就看出来了。**一次只改一个变量，或者把对照表填满。**
 
-**跑他们的转换器要 `av2`**，`pip install --no-deps av2 universal-pathlib pathlib_abc`，
+以下全部实测无影响，别再试：地图半径、点密度、车道边界、agent 筛选、地图类型编号、
+polygon 结构（一车道一 polygon）、局部坐标系偏移 1 万米。
+
+**跑他们的转换器做对比要 `av2`**：`pip install --no-deps av2 universal-pathlib pathlib_abc`，
 再把 `cv2.typing` 用 sys.modules 桩掉（那只是类型标注，别升级环境里的 opencv 4.5.1）。
-他们的模块用 `nuplan.planning.training...` 命名空间互相 import，按文件路径加载后注册进 sys.modules 即可，
-不用装他们整个 fork。代码是 AGPL-3.0，只在 scratchpad 里跑对比，不进仓库。
+他们的模块用 `nuplan.planning.training...` 命名空间互相 import，按文件路径加载后注册进 sys.modules 即可。
+**代码是 AGPL-3.0，只在 scratchpad 里跑，不进仓库；ckpt 也不要提交**（`.gitignore` 已挡）——
+AGPL 不限制"使用"，但抄代码会让我们从 Apache-2.0 变成 AGPL，对要给别人跑的 benchmark 是自断采用率。
 
 **Bosch 的 checkpoint 用的是 Argoverse 风格的地图类型编号，和原版 SMART(WOMD) 不一样。**
 他们走 nuPlan→argo→SMART 两段式，`_point_types` 表更短且顺序不同：CENTERLINE 是 11 不是 16，

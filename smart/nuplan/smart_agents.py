@@ -87,6 +87,7 @@ class SMARTAgents(AbstractObservation):
 
         self._map: Optional[Dict] = None
         self._origin = (0.0, 0.0)
+        self._shift = (0.0, 0.0)
         self._iteration = 0
         # (ego_state, {track_id: tracked_object}) at 10 Hz, oldest first.
         self._history: List = []
@@ -104,6 +105,12 @@ class SMARTAgents(AbstractObservation):
         self.reset()
         ego = self._scenario.get_ego_state_at_iteration(0)
         self._origin = (ego.center.x, ego.center.y)
+        # Where the map query is centred and how the coordinates are shifted
+        # are separate questions. The checkpoint was trained on data that was
+        # never recentred, so shifting to a local frame puts it out of
+        # distribution -- worth 7.49% against 23.62% next-token top-1. See
+        # converter.convert_scenario.
+        self._shift = (0.0, 0.0) if self._checkpoint_semantics else self._origin
         self._map = self._build_map()
 
         # Seed the window from the scenario's *past*. Before the first step
@@ -143,7 +150,7 @@ class SMARTAgents(AbstractObservation):
         that the ego cannot drive out of it in one scenario.
         """
         raw = _convert_map(self._scenario, Point2D(*self._origin),
-                           self._map_radius, True, self._origin)
+                           self._map_radius, True, self._shift)
         # The checkpoint this observation loads was trained through an
         # Argoverse-shaped intermediate, which numbers map types differently
         # from the WOMD preprocessing our converter follows. Left alone, every
@@ -155,6 +162,7 @@ class SMARTAgents(AbstractObservation):
     def reset(self) -> None:
         """Inherited, see superclass."""
         self._iteration = 0
+        self._shift = (0.0, 0.0)
         self._history = []
         self._templates = {}
         self._current = {}
@@ -286,8 +294,8 @@ class SMARTAgents(AbstractObservation):
                 valid[row, step] = True
                 kinds[row] = AGENT_TYPE.get(obj.tracked_object_type, 0)
 
-        position[:, :, 0] -= self._origin[0]
-        position[:, :, 1] -= self._origin[1]
+        position[:, :, 0] -= self._shift[0]
+        position[:, :, 1] -= self._shift[1]
         # Invalid slots must stay exactly zero: SMART's preprocessing treats a
         # non-zero position in an invalid slot as something to interpolate from,
         # and the contamination spreads to agents that were fine.
@@ -311,8 +319,8 @@ class SMARTAgents(AbstractObservation):
             template = self._templates.get(track)
             if template is None or offset >= len(traj):
                 continue
-            pose = StateSE2(float(traj[offset, 0]) + self._origin[0],
-                            float(traj[offset, 1]) + self._origin[1],
+            pose = StateSE2(float(traj[offset, 0]) + self._shift[0],
+                            float(traj[offset, 1]) + self._shift[1],
                             float(head[offset]))
             moved[track] = self._at_pose(template, pose)
         if moved:

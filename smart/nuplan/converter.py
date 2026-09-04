@@ -76,7 +76,7 @@ NUPLAN_STRIDE = 2
 def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
                      map_radius=150.0, include_boundaries=True,
                      point_spacing=MAP_POINT_SPACING,
-                     merge_lane_boundaries=False):
+                     merge_lane_boundaries=False, recentre=True):
     """Convert one nuPlan scenario into the dict SMART's preprocessing expects.
 
     Args:
@@ -93,6 +93,10 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
         merge_lane_boundaries: emit one polygon per lane holding its boundaries
             and centreline, as the nuPlan checkpoint expects, instead of WOMD's
             separate polygons. See _convert_map.
+        recentre: subtract the ego position, putting the scene in local
+            coordinates. Right for a model trained on WOMD, wrong for the
+            nuPlan-trained checkpoint -- see below, it is worth 7.49% against
+            23.62%.
 
     Returns:
         A dict with the keys TokenProcessor.preprocess reads.
@@ -100,19 +104,36 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
     agent = _convert_agents(scenario, num_steps, stride)
     centre = agent['position'][agent['av_index'], WOMD_CURRENT_STEP, :2]
     origin = (float(centre[0]), float(centre[1]))
+    # The map query always centres on the ego; `shift` is a separate question,
+    # and is what decides the coordinate frame everything comes back in.
+    shift = origin if recentre else (0.0, 0.0)
     map_data = _convert_map(scenario, Point2D(*origin), map_radius,
-                            include_boundaries, origin, point_spacing,
+                            include_boundaries, shift, point_spacing,
                             merge_lane_boundaries)
 
-    # Everything above is in global UTM and float64. Casting UTM straight to
-    # float32 is what silently ruins this conversion: a northing near 4e6 has a
-    # float32 spacing of 0.25 m, so lane geometry and agent positions get
-    # quantised to a quarter of a metre, and consecutive polyline points
-    # collapse onto each other. WOMD ships local coordinates in the low
-    # thousands and never had the problem. Recentring on the ego puts nuPlan in
-    # the same regime, where the spacing is well under a millimetre.
-    agent['position'][..., 0] -= origin[0]
-    agent['position'][..., 1] -= origin[1]
+    # Everything above is in global UTM and float64, and whether to leave it
+    # there is not the free choice it looks like.
+    #
+    # The argument for recentring is real: a northing near 4e6 has a float32
+    # spacing of about half a metre, so casting UTM straight down quantises
+    # lane geometry and agent positions onto that grid. WOMD ships local
+    # coordinates in the low thousands and never had the problem.
+    #
+    # The argument against it is that the nuPlan checkpoint was trained on data
+    # that was never recentred, quantisation and all, so clean local
+    # coordinates are out of distribution for it -- and that turns out to
+    # dominate. Measured over 28 scenarios across two scenario types and 21345
+    # tokens, recentred scores 7.49% next-token top-1 against 23.62% left in
+    # UTM, better in all 28. That is nearly the whole gap against the
+    # conversion the checkpoint's authors use, which reaches 25.70%.
+    #
+    # So the frame has to match the checkpoint rather than the numerics: local
+    # for a WOMD-trained model, global for this one. It also needs
+    # MAP_POINT_SPACING to stay coarse -- at nuPlan's native 0.25 m the
+    # quantisation collapses consecutive polyline points and the map tokenizer
+    # raises inside interplating_polyline.
+    agent['position'][..., 0] -= shift[0]
+    agent['position'][..., 1] -= shift[1]
     # Invalid slots must stay exactly zero. They were never written, so the
     # subtraction above would leave them at minus the origin -- a position
     # several million metres away that looks like data. SMART's preprocessing
