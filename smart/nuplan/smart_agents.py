@@ -22,6 +22,7 @@ constantly would be wasteful and would also make the traffic jitter as
 successive rollouts disagree.
 """
 import copy
+import os
 from typing import Dict, List, Optional, Type
 
 import torch
@@ -351,6 +352,28 @@ class SMARTAgents(AbstractObservation):
         return DetectionsTracks(TrackedObjects(list(self._current.values()) + static))
 
 
+def resolve_checkpoint(checkpoint_path: str) -> str:
+    """Absolute path to a checkpoint given relative to the repository.
+
+    nuPlan's runner is a hydra application, and hydra changes the working
+    directory to the run's output folder before anything is built. A relative
+    path in a config therefore resolves somewhere inside the results tree and
+    the only clue is a FileNotFoundError with no filename in it. Relative paths
+    are resolved against the repository root so a config can stay readable.
+    """
+    if os.path.isabs(checkpoint_path) or os.path.exists(checkpoint_path):
+        return checkpoint_path
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidate = os.path.join(root, checkpoint_path)
+    if os.path.exists(candidate):
+        return candidate
+    raise FileNotFoundError(
+        f'SMART checkpoint not found: tried {checkpoint_path!r} from '
+        f'{os.getcwd()!r} and {candidate!r}. It is not in the repository -- '
+        f'fetch it from the release the paper points at, or set '
+        f'SMART_CHECKPOINT to an absolute path.')
+
+
 def load_smart(checkpoint_path: str, device: str = 'cuda'):
     """Build SMART from a checkpoint, using the config stored inside it.
 
@@ -361,6 +384,7 @@ def load_smart(checkpoint_path: str, device: str = 'cuda'):
     """
     from smart.model import SMART
 
+    checkpoint_path = resolve_checkpoint(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     model = SMART(checkpoint['hyper_parameters']['model_config'])
     missing, unexpected = model.load_state_dict(checkpoint['state_dict'], strict=False)
