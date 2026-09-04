@@ -328,3 +328,30 @@ def test_agents_move_smoothly_between_predicted_poses():
         seen.append(moved.box.center.y)
     steps = [abs(b - a) for a, b in zip(seen, seen[1:])]
     assert all(s > 0.0 for s in steps), f'stalled on some step: {steps}'
+
+
+def test_velocity_is_recomputed_from_the_motion():
+    """Carrying the template's velocity pins every agent to its t=0 state.
+
+    SMART reads velocity back as its own input, and the history ablation says
+    velocity is the only part of the history that matters, so a stale value
+    feeds straight into the next rollout. The planner reads it too.
+    """
+    observation = make([agent('a', 10.0, 0.0)])
+
+    class RampModel(StubModel):
+        def inference(self, data):
+            count = int(data['agent']['num_nodes'])
+            traj = torch.zeros(count, 80, 2)
+            traj[:, :, 1] = torch.arange(1, 81, dtype=torch.float)
+            return {'pred_traj': traj, 'pred_head': torch.zeros(count, 80)}
+
+    observation._model = RampModel()
+    observation.initialize()
+    for index in range(3):
+        step(observation, index, ego_at(float(index), 0.0))
+    moved = [o for o in observation.get_observation().tracked_objects
+             if o.track_token == 'a'][0]
+    # The stub advances one metre per 10 Hz step, so 10 m/s northwards.
+    assert moved.velocity.y == pytest.approx(10.0, abs=0.5)
+    assert moved.velocity.x == pytest.approx(0.0, abs=0.5)

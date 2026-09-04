@@ -31,7 +31,8 @@ import torch
 from nuplan.common.actor_state.agent import Agent
 from nuplan.common.actor_state.oriented_box import OrientedBox
 from nuplan.common.actor_state.scene_object import SceneObject
-from nuplan.common.actor_state.state_representation import Point2D, StateSE2
+from nuplan.common.actor_state.state_representation import (Point2D, StateSE2,
+                                                            StateVector2D)
 from nuplan.common.actor_state.static_object import StaticObject
 from nuplan.common.actor_state.tracked_objects import TrackedObjects
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
@@ -91,6 +92,7 @@ class SMARTAgents(AbstractObservation):
         self._scenario = scenario
         self._replan_seconds = replan_seconds
         # Filled in at initialize, once the scenario can be asked its rate.
+        self._step_time = SMART_STEP_S
         self._stride = 1
         self._replan_steps = 1
         self._map_radius = map_radius
@@ -137,6 +139,7 @@ class SMARTAgents(AbstractObservation):
         # One SMART step per `stride` simulation steps. A 10 Hz simulation
         # gives 1, a 20 Hz one gives 2.
         step_time = getattr(self._scenario, 'database_interval', SMART_STEP_S)
+        self._step_time = step_time
         self._stride = max(1, int(round(SMART_STEP_S / step_time)))
         self._replan_steps = max(1, int(round(self._replan_seconds / step_time)))
         horizon = (HISTORY_STEPS - 1) * SMART_STEP_S
@@ -359,16 +362,42 @@ class SMARTAgents(AbstractObservation):
                 delta = float(head[index + 1]) - heading
                 heading += fraction * math.atan2(math.sin(delta), math.cos(delta))
             pose = StateSE2(x + self._shift[0], y + self._shift[1], heading)
-            moved[track] = self._at_pose(template, pose)
+            previous = self._current.get(track)
+            velocity = None
+            if previous is not None and self._step_time > 0.0:
+                velocity = StateVector2D(
+                    (pose.x - previous.box.center.x) / self._step_time,
+                    (pose.y - previous.box.center.y) / self._step_time)
+            moved[track] = self._at_pose(template, pose, velocity)
         if moved:
             self._current = moved
 
     @staticmethod
-    def _at_pose(original, pose: StateSE2):
-        """A copy of `original` moved to `pose`, keeping its identity and size."""
+    def _at_pose(original, pose: StateSE2, velocity=None):
+        """A copy of `original` moved to `pose`, keeping its identity and size.
+
+        The velocity has to be recomputed from the motion, not carried over.
+        `original` is the object as first seen, so reusing its velocity pins
+        every agent to whatever it was doing at t=0 for the rest of the
+        scenario.
+
+        Not for SMART's benefit -- it never reads the field. The model outputs
+        positions and headings only, and derives motion from the position
+        history: `agent_token_embedding` assigns `token_velocity` to a local
+        and never uses it, and `inference` recomputes velocity from
+        `motion_vector_a`. Feeding it a stale velocity changes nothing.
+
+        It matters because everything downstream reads it. nuPlan's
+        time-to-collision projects agents forward along their reported
+        velocity, and a planner deciding whether to yield reads it too, so an
+        agent that has been driving for ten seconds while reporting the
+        velocity it had at t=0 is invisible to exactly the machinery this
+        benchmark measures.
+        """
         box = OrientedBox.from_new_pose(original.box, pose)
         if isinstance(original, Agent):
-            return Agent(original.tracked_object_type, box, original.velocity,
+            return Agent(original.tracked_object_type, box,
+                         velocity if velocity is not None else original.velocity,
                          original.metadata, original.angular_velocity)
         if isinstance(original, StaticObject):
             return StaticObject(original.tracked_object_type, box, original.metadata)
