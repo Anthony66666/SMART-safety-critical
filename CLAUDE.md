@@ -14,6 +14,10 @@
 | `nuplan` | torch 1.9，devkit 能用但跑不了 Flow Planner。基本弃用 |
 | `smart` | 原 SMART 仓库的环境，WOMD 那条线才需要 |
 
+`flow_planner` 里已补装 `torch_geometric` + `torch_scatter` + `torch_cluster`（SMART 要用）。
+代理封了 `data.pyg.org`，预编译轮子拿不到，是用 conda 环境 `build_tools` 里的 gcc 从 pypi
+源码编的，**只有 CPU 版**。服务器上要装 CUDA 版（那边能连 data.pyg.org 就直接 pip）。
+
 一律用绝对路径调解释器，**不要 `conda activate`**——非交互 shell 里 conda 初始化不可靠，这个坑踩过：
 
 ```bash
@@ -63,6 +67,8 @@ python scripts/server/score.py ~/occlusion-bench/exp --by-type
 - `smart/occlusion/visibility.py`——2D 视线几何，**零自由参数**
 - `smart/occlusion/tracking.py`——跨遮挡的目标记忆，**不依赖 nuPlan**，可用合成序列测
 - `smart/nuplan/occluded_observation.py`——包装任意 `AbstractObservation`，过滤 `DetectionsTracks`
+- `smart/nuplan/smart_agents.py`——用 SMART 驱动背景车流替代 IDM。参考了 Bosch 的
+  `interactive-closed-loop`（AGPL-3.0，**只读不抄**，代码自己写），只共用他们的 nuPlan checkpoint
 
 指标、碰撞判定、责任归属**一律用 devkit 的**。曾经自己重写过一套，已删除——自造指标和官方数字对不上，整个对比就无法引用。
 
@@ -81,6 +87,20 @@ python scripts/server/score.py ~/occlusion-bench/exp --by-type
 **选场景必须按官方 `scenario_tag`。** 随意挑起始帧会挑到静止场景（mini 里 `stationary` 标签 62375 帧），expert 全程只动 3.8 米，任何感知假设都不可能改变结果。见 `smart/nuplan/scenarios.py`。
 
 **ego_pose 存的是后轴不是车体中心**，Pacifica 差 1.461 m。
+
+**SMART 的 token 词表只覆盖前向运动。** 造反应性测试时让假 ego 沿 +y 平移、heading 却指别处，
+等于在倒着开——`match_token` 匹配不上任何模板，退化成近似静止的 token，两条不同的 ego 轨迹
+因此得到**逐位相同**的预测。当时差点据此得出"交通对 ego 无反应"的错误结论。测试里的 ego
+必须沿自己的 heading 走。换成物理合理的轨迹后：192 个物体里 58 个不同，最大 0.917 m。
+
+**`WaymoTargetBuilder` 是训练用的，推理不能用。** 它按 agent 的**未来**有效帧数决定预测谁，
+还随机下采样。闭环里未来按定义全无效——用它等于一个都不预测，车全部静止。直接 `HeteroData(data)`。
+
+**`TokenProcessor.preprocess` 原地修改地图字典。** 缓存的 `self._map` 被第一次 rollout 消费掉，
+之后每次读到的都是自己的残渣。每次 rollout 要 `copy.deepcopy`。
+
+**SMART 的历史窗口必须取过去，不能从 iteration 0 往后读。** 往后读等于开局就把 ego 两秒的
+日志未来喂给模型。用 `get_ego_past_trajectory` / `get_past_tracked_objects`。
 
 **性能**：瓶颈在 CPU（nuPlan 地图查询约 296 ms/步），不在 GPU。遮挡本身只加约 5%。
 

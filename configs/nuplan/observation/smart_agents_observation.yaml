@@ -1,0 +1,26 @@
+# Background traffic driven by SMART, replacing nuPlan's IDM.
+#
+# IDM follows a lead vehicle down its own path and reacts to nothing else, so
+# the "reactive" closed-loop challenge is reactive only in the narrowest sense:
+# an agent in an adjacent lane cannot yield, cut in, or respond to the ego at
+# all. Hagedorn et al. (ICRA 2026) replaced it with SMART and released a
+# nuPlan-trained checkpoint; this benchmark adopts that as infrastructure.
+#
+# For the occlusion question this matters more than it might look. Under log
+# replay the other cars drive their logged trajectory no matter what the ego
+# does, so a planner that hesitates because it cannot see is never punished by
+# traffic that fails to anticipate it -- and never rewarded either. A reactive
+# traffic model is what lets the cost of not seeing something show up.
+_target_: smart.nuplan.smart_agents.build_smart_agents
+_convert_: 'all'
+
+# Not in git: fetch it from the release the paper points at.
+checkpoint_path: ${oc.env:SMART_CHECKPOINT,checkpoints/bosch_nuplan_smart.ckpt}
+
+# Simulation steps between rollouts. At 20 Hz, 10 is half a second of predicted
+# motion consumed per inference. Lower is not obviously better: successive
+# rollouts disagree, and re-running every step makes the traffic jitter.
+replan_steps: 10
+
+# Metres of map handed to the model, around the starting ego.
+map_radius: 150.0

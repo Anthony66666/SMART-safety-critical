@@ -14,7 +14,6 @@ import numpy as np
 import pickle
 from collections import defaultdict
 import os
-from waymo_open_dataset.protos import sim_agents_submission_pb2
 
 
 def cal_polygon_contour(x, y, theta, width, length):
@@ -38,7 +37,16 @@ def cal_polygon_contour(x, y, theta, width, length):
     return polygon_contour
 
 
-def joint_scene_from_states(states, object_ids) -> sim_agents_submission_pb2.JointScene:
+def joint_scene_from_states(states, object_ids):
+    """Package a rollout as a WOMD sim-agents submission.
+
+    The import is deferred because it is the only thing in this file that needs
+    waymo_open_dataset, and that package drags in TensorFlow. Using SMART as a
+    traffic model inside nuPlan needs neither, and a top-level import would make
+    the whole environment depend on a submission format we never emit.
+    """
+    from waymo_open_dataset.protos import sim_agents_submission_pb2
+
     states = states.numpy()
     simulated_trajectories = []
     for i_object in range(len(object_ids)):

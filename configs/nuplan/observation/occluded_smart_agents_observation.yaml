@@ -1,0 +1,24 @@
+# SMART-driven traffic, filtered to what the ego can actually see.
+#
+# The two wrappers compose in one order only. Occlusion goes outside, so SMART
+# still sees the whole scene and drives the traffic as it would have anyway;
+# what the *planner* receives is then filtered. Putting occlusion underneath
+# would instead give the traffic model the ego's blind spots, which is a
+# different and much stranger experiment -- every other car in the city would
+# suddenly forget whatever our ego happens to have behind a van.
+_target_: smart.nuplan.occluded_observation.build_occluded_observation
+_convert_: 'all'
+# The wrapped observation must reach the factory as config, not as an object:
+# it needs the scenario, which only the factory has.
+_recursive_: false
+
+observation:
+  _target_: smart.nuplan.smart_agents.build_smart_agents
+  _convert_: 'all'
+  checkpoint_path: ${oc.env:SMART_CHECKPOINT,checkpoints/bosch_nuplan_smart.ckpt}
+  replan_steps: 10
+  map_radius: 150.0
+
+# Seconds an occluded track survives in memory. Zero is per-frame, which is the
+# default everywhere in this benchmark; see smart/occlusion/tracking.py.
+memory_horizon: 0.0
