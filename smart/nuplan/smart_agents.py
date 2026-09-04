@@ -22,6 +22,7 @@ constantly would be wasteful and would also make the traffic jitter as
 successive rollouts disagree.
 """
 import copy
+import math
 import os
 from typing import Dict, List, Optional, Type
 
@@ -313,16 +314,35 @@ class SMARTAgents(AbstractObservation):
         return agent
 
     def _advance(self) -> None:
-        """Move each agent onto the pose its rollout says it should be at."""
-        offset = (self._iteration - self._plan_start) // NUPLAN_STRIDE
+        """Move each agent onto the pose its rollout says it should be at.
+
+        SMART predicts at 10 Hz and nuPlan simulates at 20 Hz, so every
+        predicted pose covers two simulation steps. Holding each one for both
+        makes exactly half the steps a zero-length move: the traffic stutters,
+        and a planner reading velocity or time-to-collision off consecutive
+        frames sees agents that alternate between stopped and travelling at
+        twice their real speed. It shows up as a median vehicle speed of
+        exactly zero. Interpolating between the two poses instead costs
+        nothing and gives smooth motion.
+        """
+        elapsed = (self._iteration - self._plan_start) / NUPLAN_STRIDE
+        index = int(elapsed)
+        fraction = elapsed - index
         moved = {}
         for track, (traj, head) in self._plan.items():
             template = self._templates.get(track)
-            if template is None or offset >= len(traj):
+            if template is None or index >= len(traj):
                 continue
-            pose = StateSE2(float(traj[offset, 0]) + self._shift[0],
-                            float(traj[offset, 1]) + self._shift[1],
-                            float(head[offset]))
+            x, y = float(traj[index, 0]), float(traj[index, 1])
+            heading = float(head[index])
+            if fraction > 0.0 and index + 1 < len(traj):
+                x += fraction * (float(traj[index + 1, 0]) - x)
+                y += fraction * (float(traj[index + 1, 1]) - y)
+                # Headings wrap, so interpolate the shorter way round rather
+                # than sweeping the long way through pi.
+                delta = float(head[index + 1]) - heading
+                heading += fraction * math.atan2(math.sin(delta), math.cos(delta))
+            pose = StateSE2(x + self._shift[0], y + self._shift[1], heading)
             moved[track] = self._at_pose(template, pose)
         if moved:
             self._current = moved

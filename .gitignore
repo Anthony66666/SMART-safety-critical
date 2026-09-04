@@ -144,3 +144,5 @@ nuplan_zeroshot.png
 checkpoints/tuplan/
 checkpoints/diffusion_planner/
 gifs/
+exp_local/
+traffic_gifs/

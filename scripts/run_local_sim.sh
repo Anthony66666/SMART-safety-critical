@@ -24,6 +24,9 @@ OBS=${OBS:-}
 LIMIT=${LIMIT:-2}
 CHALLENGE=${CHALLENGE:-closed_loop_nonreactive_agents}
 OUT=${OUT:-$BENCH/exp_local}
+# Simulation logs are what the GIF renderer reads. They are large, so they are
+# off unless asked for.
+KEEP_LOGS=${KEEP_LOGS:-0}
 
 # SMART's compiled extensions are CPU-only in this environment -- data.pyg.org
 # is unreachable from here so torch_cluster and torch_scatter were built from
@@ -34,6 +37,8 @@ OUT=${OUT:-$BENCH/exp_local}
 export SMART_DEVICE=${SMART_DEVICE:-cpu}
 OBS_ARG=""
 [ -n "$OBS" ] && OBS_ARG="observation=$OBS"
+LOG_ARG="~callback.simulation_log_callback"
+[ "$KEEP_LOGS" = "1" ] && LOG_ARG=""
 
 echo "planner=$PLANNER  observation=${OBS:-<default>}  scenarios=$LIMIT"
 
@@ -43,7 +48,7 @@ PYTHONPATH="$BENCH:${PYTHONPATH:-}" \
     +simulation="$CHALLENGE" \
     planner="$PLANNER" \
     $OBS_ARG \
-    ~callback.simulation_log_callback \
+    $LOG_ARG \
     scenario_builder=nuplan_mini \
     scenario_builder.data_root="$DATA" \
     scenario_builder.map_root="$MAPS" \

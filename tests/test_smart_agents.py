@@ -265,3 +265,34 @@ def test_inference_runs_once_per_replan_interval():
     for index in range(20):
         step(observation, index, ego_at(float(index), 0.0))
     assert observation._model.calls == 2
+
+
+def test_agents_move_smoothly_between_predicted_poses():
+    """SMART predicts at 10 Hz, nuPlan steps at 20 Hz.
+
+    Holding each predicted pose for both steps makes half of them a zero-length
+    move, so the traffic stutters and anything reading speed off consecutive
+    frames sees agents alternating between stopped and double speed. The
+    symptom is a median vehicle speed of exactly zero.
+    """
+    observation = make([agent('a', 10.0, 0.0)])
+
+    class RampModel(StubModel):
+        """A trajectory that actually goes somewhere, one metre per 10 Hz step."""
+
+        def inference(self, data):
+            count = int(data['agent']['num_nodes'])
+            traj = torch.zeros(count, 80, 2)
+            traj[:, :, 1] = torch.arange(1, 81, dtype=torch.float)
+            return {'pred_traj': traj, 'pred_head': torch.zeros(count, 80)}
+
+    observation._model = RampModel()
+    observation.initialize()
+    seen = []
+    for index in range(6):
+        step(observation, index, ego_at(float(index), 0.0))
+        moved = [o for o in observation.get_observation().tracked_objects
+                 if o.track_token == 'a'][0]
+        seen.append(moved.box.center.y)
+    steps = [abs(b - a) for a, b in zip(seen, seen[1:])]
+    assert all(s > 0.0 for s in steps), f'stalled on some step: {steps}'
