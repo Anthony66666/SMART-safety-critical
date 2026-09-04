@@ -7,6 +7,7 @@ embedding ranges. Whether the whole thing runs on real data is answered by
 scripts/nuplan_occlusion_check.py and by tokenizing a converted scenario, not
 by mocking a NuPlanScenario in full.
 """
+import torch
 import math
 
 import pytest
@@ -142,3 +143,28 @@ def test_polyline_drops_points_a_repeated_point_would_duplicate():
 
 def test_polyline_rejects_a_path_that_is_all_one_point():
     assert _polyline([Pose(5, 5), Pose(5, 5), Pose(5, 5)]) is None
+
+
+def test_nuplan_checkpoint_semantics_uses_the_rows_that_were_trained():
+    """The released nuPlan checkpoint numbers map types differently from WOMD.
+
+    Its type embedding gives this away: only rows 0, 8 and 11 carry trained
+    weights, everything else sits at its initialisation. Our converter follows
+    the WOMD numbering, so without this relabelling every point type we emit --
+    centreline included -- lands on a row that checkpoint never saw.
+    """
+    from smart.nuplan.converter import (PT_CENTERLINE, PT_CROSSWALK, PT_EDGE,
+                                        POLYGON_PEDESTRIAN, PL2PL_PRED,
+                                        to_nuplan_checkpoint_semantics)
+
+    data = {
+        'map_point': {'type': torch.tensor([PT_CENTERLINE, PT_EDGE, PT_CROSSWALK])},
+        'map_polygon': {'type': torch.tensor([POLYGON_PEDESTRIAN])},
+        ('map_polygon', 'to', 'map_polygon'): {'type': torch.tensor([PL2PL_PRED])},
+    }
+    out = to_nuplan_checkpoint_semantics(data)
+    assert out['map_point']['type'].tolist() == [11, 0, 10]
+    assert out['map_polygon']['type'].tolist() == [2]
+    assert out[('map_polygon', 'to', 'map_polygon')]['type'].tolist() == [0]
+    # The original must survive: the WOMD-trained checkpoint still needs it.
+    assert data['map_point']['type'].tolist() == [PT_CENTERLINE, PT_EDGE, PT_CROSSWALK]

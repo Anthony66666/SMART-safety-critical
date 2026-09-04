@@ -88,6 +88,21 @@ python scripts/server/score.py ~/occlusion-bench/exp --by-type
 
 **ego_pose 存的是后轴不是车体中心**，Pacifica 差 1.461 m。
 
+**Bosch 的 checkpoint 用的是 Argoverse 风格的地图类型编号，和原版 SMART(WOMD) 不一样。**
+他们走 nuPlan→argo→SMART 两段式，`_point_types` 表更短且顺序不同：CENTERLINE 是 11 不是 16，
+CROSSWALK 是 10 不是 15，车道边界是 0(DASHED_WHITE)/8(NONE)。checkpoint 本身能证实——
+`type_pt_emb` 只有第 0、8、11 行范数约 2.3，其余全在 0.11（初始化没动过）。
+我们的转换器按 WOMD 编号发 12/15/16，**全部打在未训练的行上**。
+`converter.to_nuplan_checkpoint_semantics()` 做重映射，`SMARTAgents` 默认开启。
+
+**但这不是精度差距的原因——假设被自己的数据推翻了。** 重映射把 type embedding 平均范数
+从 0.109 提到 2.240（确认生效），next-token 准确率在 17816 个 token 上从 6.81%→6.65% (top-1)、
+30.07%→30.02% (top-10)，逐场景两个方向都是噪声。**地图类型 embedding 根本不承载信息，几何才承载。**
+改还是要改（给 checkpoint 喂没见过的索引是隐患），但别当成性能修复。
+
+**他们完全没对齐真实车道线语义。** `argo_vector_utils.py:148` 只用 `is_intersection` 一个布尔量：
+路口内→NONE，路口外→DASHED_WHITE。nuPlan 的真实标线类型一个都没读。
+
 **SMART 的 token 词表只覆盖前向运动。** 造反应性测试时让假 ego 沿 +y 平移、heading 却指别处，
 等于在倒着开——`match_token` 匹配不上任何模板，退化成近似静止的 token，两条不同的 ego 轨迹
 因此得到**逐位相同**的预测。当时差点据此得出"交通对 ego 无反应"的错误结论。测试里的 ego

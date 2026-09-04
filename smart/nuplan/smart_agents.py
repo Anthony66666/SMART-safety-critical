@@ -39,8 +39,9 @@ from nuplan.planning.simulation.observation.observation_type import DetectionsTr
 from torch_geometric.data import HeteroData
 
 from smart.datasets.preprocess import TokenProcessor
-from smart.nuplan.converter import (AGENT_TYPE, AGENT_VEHICLE, NUPLAN_STRIDE, WOMD_CURRENT_STEP,
-                                    WOMD_STEPS, _convert_map)
+from smart.nuplan.converter import (AGENT_TYPE, AGENT_VEHICLE, NUPLAN_STRIDE,
+                                    WOMD_CURRENT_STEP, WOMD_STEPS, _convert_map,
+                                    to_nuplan_checkpoint_semantics)
 
 # SMART's history window: the current step plus everything before it.
 HISTORY_STEPS = WOMD_CURRENT_STEP + 1
@@ -67,16 +68,21 @@ class SMARTAgents(AbstractObservation):
         map_radius: metres of map around the starting ego handed to the model.
         seed: makes the rollout reproducible, and identical between the
             occluded and unoccluded runs of the same scenario.
+        checkpoint_semantics: relabel map types to the numbering the
+            nuPlan-trained checkpoint saw. Turn it off for a model trained
+            through this repo's own WOMD preprocessing.
     """
 
     def __init__(self, model, scenario, replan_steps: int = 10,
-                 map_radius: float = 150.0, seed: int = 0, device: str = 'cuda'):
+                 map_radius: float = 150.0, seed: int = 0,
+                 checkpoint_semantics: bool = True, device: str = 'cuda'):
         self._model = model
         self._scenario = scenario
         self._replan_steps = replan_steps
         self._map_radius = map_radius
         self._seed = seed
         self._device = device
+        self._checkpoint_semantics = checkpoint_semantics
         self._token_processor = TokenProcessor(2048)
 
         self._map: Optional[Dict] = None
@@ -136,8 +142,15 @@ class SMARTAgents(AbstractObservation):
         is built at initialise time and reused. The radius is generous enough
         that the ego cannot drive out of it in one scenario.
         """
-        return _convert_map(self._scenario, Point2D(*self._origin),
-                            self._map_radius, True, self._origin)
+        raw = _convert_map(self._scenario, Point2D(*self._origin),
+                           self._map_radius, True, self._origin)
+        # The checkpoint this observation loads was trained through an
+        # Argoverse-shaped intermediate, which numbers map types differently
+        # from the WOMD preprocessing our converter follows. Left alone, every
+        # point type we emit lands on an embedding row that checkpoint never
+        # trained. See to_nuplan_checkpoint_semantics -- including the
+        # measurement showing this does not actually move next-token accuracy.
+        return to_nuplan_checkpoint_semantics(raw) if self._checkpoint_semantics else raw
 
     def reset(self) -> None:
         """Inherited, see superclass."""

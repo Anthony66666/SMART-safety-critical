@@ -360,3 +360,64 @@ def _lane_graph(lanes, lane_index):
         return torch.zeros(2, 0, dtype=torch.long), torch.zeros(0, dtype=torch.uint8)
     return (torch.tensor([sources, targets], dtype=torch.long),
             torch.tensor(kinds, dtype=torch.uint8))
+
+
+# The constants above follow the original SMART repo's WOMD preprocessing, which
+# is the vocabulary its released checkpoint was trained on. The nuPlan-trained
+# checkpoint from Hagedorn et al. was not: they route nuPlan through an
+# Argoverse-shaped intermediate whose type lists are ordered differently and
+# shorter, so the same semantics land on different integers.
+#
+#   semantics    WOMD (ours)   nuPlan checkpoint
+#   CENTERLINE       16              11
+#   CROSSWALK        15              10
+#   lane boundary    12 (EDGE)        0 (DASHED_WHITE) / 8 (NONE) in intersections
+#   polygon PEDESTRIAN 3               2
+#   PRED/SUCC/LEFT/RIGHT 1,2,3,4      0,1,2,3
+#
+# Their conversion reads no real nuPlan lane-marking semantics at all: every
+# boundary is DASHED_WHITE unless the lane is a connector, in which case NONE.
+# Only three point-type rows were ever trained, which the checkpoint confirms --
+# rows 0, 8 and 11 have weight norms around 2.3 and every other row sits near
+# its initialisation at about 0.11.
+#
+# Measured, this changes nothing: remapping lifts the mean type-embedding norm
+# from 0.109 to 2.240, and next-token accuracy over 17816 tokens on nuPlan mini
+# moves from 6.81% to 6.65% top-1 and 30.07% to 30.02% top-10 -- noise, in both
+# directions per scenario. The map type embedding is simply not what carries the
+# information; the geometry is. It is corrected anyway, because handing a
+# checkpoint indices it has never seen is a latent bug that costs nothing to
+# avoid, but it is not a fix for the accuracy gap and should not be sold as one.
+NUPLAN_CHECKPOINT_POINT_TYPES = {PT_CENTERLINE: 11, PT_CROSSWALK: 10, PT_EDGE: 0}
+NUPLAN_CHECKPOINT_POLYGON_TYPES = {POLYGON_BUS: 3, POLYGON_PEDESTRIAN: 2}
+NUPLAN_CHECKPOINT_EDGE_TYPES = {PL2PL_PRED: 0, PL2PL_SUCC: 1,
+                                PL2PL_LEFT: 2, PL2PL_RIGHT: 3}
+
+
+def _remap(tensor, table):
+    """Relabel a type tensor, leaving anything absent from the table alone."""
+    out = tensor.clone()
+    for old, new in table.items():
+        out[tensor == old] = new
+    return out
+
+
+def to_nuplan_checkpoint_semantics(map_data):
+    """Relabel map types for the nuPlan-trained SMART checkpoint.
+
+    Takes the dict `_convert_map` returns and gives back one using the integers
+    that checkpoint was trained with. Leaves the WOMD-trained path untouched,
+    which still needs the original numbering.
+    """
+    data = dict(map_data)
+    data['map_point'] = dict(data['map_point'])
+    data['map_point']['type'] = _remap(data['map_point']['type'],
+                                       NUPLAN_CHECKPOINT_POINT_TYPES)
+    data['map_polygon'] = dict(data['map_polygon'])
+    data['map_polygon']['type'] = _remap(data['map_polygon']['type'],
+                                         NUPLAN_CHECKPOINT_POLYGON_TYPES)
+    key = ('map_polygon', 'to', 'map_polygon')
+    if key in data and 'type' in data[key]:
+        data[key] = dict(data[key])
+        data[key]['type'] = _remap(data[key]['type'], NUPLAN_CHECKPOINT_EDGE_TYPES)
+    return data
