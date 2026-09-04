@@ -62,13 +62,20 @@ LIGHT_STATE = {
     TrafficLightStatusType.YELLOW: LIGHT_CAUTION,
 }
 
+# Geometry limits. MIN_SEGMENT drops duplicate points; MAP_POINT_SPACING sets
+# the map resolution -- nuPlan hands out roughly 0.25 m and SMART was trained on
+# about 1 m. See _polyline: matching it is a memory win, not an accuracy one.
+MIN_SEGMENT = 1e-3
+MAP_POINT_SPACING = 1.0
+
 WOMD_STEPS = 91
 WOMD_CURRENT_STEP = 10
 NUPLAN_STRIDE = 2
 
 
 def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
-                     map_radius=150.0, include_boundaries=True):
+                     map_radius=150.0, include_boundaries=True,
+                     point_spacing=MAP_POINT_SPACING):
     """Convert one nuPlan scenario into the dict SMART's preprocessing expects.
 
     Args:
@@ -79,6 +86,9 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
         map_radius: metres around the ego at the current step to take map from.
         include_boundaries: emit lane boundaries as EDGE polylines as well as
             centrelines.
+        point_spacing: metres between consecutive map points. See _polyline --
+            nuPlan's native density is four times finer than SMART expects,
+            which costs memory rather than accuracy.
 
     Returns:
         A dict with the keys TokenProcessor.preprocess reads.
@@ -87,7 +97,7 @@ def convert_scenario(scenario, num_steps=WOMD_STEPS, stride=NUPLAN_STRIDE,
     centre = agent['position'][agent['av_index'], WOMD_CURRENT_STEP, :2]
     origin = (float(centre[0]), float(centre[1]))
     map_data = _convert_map(scenario, Point2D(*origin), map_radius,
-                            include_boundaries, origin)
+                            include_boundaries, origin, point_spacing)
 
     # Everything above is in global UTM and float64. Casting UTM straight to
     # float32 is what silently ruins this conversion: a northing near 4e6 has a
@@ -189,11 +199,20 @@ def _convert_agents(scenario, num_steps, stride):
             'velocity': velocity, 'shape': shape}
 
 
-MIN_SEGMENT = 1e-3
-
-
-def _polyline(states):
+def _polyline(states, spacing=MIN_SEGMENT):
     """Positions, headings, segment lengths and rises along a discrete path.
+
+    `spacing` is the minimum distance between consecutive kept points, which is
+    what sets the map's resolution. nuPlan's discrete_path arrives at about
+    0.25 m against the 1 m the pipeline behind the released nuPlan checkpoint
+    resamples to, so thinning to 1 m matches what that model was trained on and
+    drops the map from about 63k points to 15k for the same scenario.
+
+    It buys nothing in accuracy, and the honest place to say so is here:
+    next-token top-1 moves 5.60% -> 5.68%, which is noise. Density was a
+    suspect for the large gap against that pipeline and it is not the cause.
+    Kept because a quarter of the map points at no measured cost is worth
+    having, and because it is the density the checkpoint saw.
 
     WOMD drops the last point of every polyline, because each point carries the
     vector leaving it. Following that keeps the point and edge counts consistent
@@ -210,8 +229,14 @@ def _polyline(states):
         return None
     xy = [[states[0].x, states[0].y, 0.0]]
     for state in states[1:]:
-        if math.hypot(state.x - xy[-1][0], state.y - xy[-1][1]) >= MIN_SEGMENT:
+        if math.hypot(state.x - xy[-1][0], state.y - xy[-1][1]) >= spacing:
             xy.append([state.x, state.y, 0.0])
+    # Thinning can leave a short polyline with a single point. Keeping its
+    # endpoint preserves the segment rather than dropping the lane outright.
+    if len(xy) < 2 and len(states) >= 2:
+        last = states[-1]
+        if math.hypot(last.x - xy[-1][0], last.y - xy[-1][1]) >= MIN_SEGMENT:
+            xy.append([last.x, last.y, 0.0])
     if len(xy) < 2:
         return None
     xy = torch.tensor(xy, dtype=torch.float64)
@@ -234,7 +259,8 @@ def _traffic_lights(scenario):
     return states
 
 
-def _convert_map(scenario, centre, radius, include_boundaries, origin):
+def _convert_map(scenario, centre, radius, include_boundaries, origin,
+                 point_spacing=MAP_POINT_SPACING):
     """Lanes, their boundaries and crosswalks as typed polygons of points."""
     map_api = scenario.map_api
     layers = [SemanticMapLayer.LANE, SemanticMapLayer.LANE_CONNECTOR,
@@ -247,7 +273,7 @@ def _convert_map(scenario, centre, radius, include_boundaries, origin):
     lane_index = {}
 
     def add(points, pt_type, pl_type, light=LIGHT_UNKNOWN):
-        line = _polyline(points)
+        line = _polyline(points, point_spacing)
         if line is None:
             return None
         xy, orientation, magnitude, rise = line

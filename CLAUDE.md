@@ -88,6 +88,35 @@ python scripts/server/score.py ~/occlusion-bench/exp --by-type
 
 **ego_pose 存的是后轴不是车体中心**，Pacifica 差 1.461 m。
 
+**我们的转换器比 Bosch 的差 3.7 倍，问题在地图结构。** 同场景同 checkpoint、只换转换器，
+按真实 agent（排除背景物体，否则静止的锥桶白送准确率）算 next-token：
+
+| 转换器 | top-1 | top-10 |
+|---|---|---|
+| 我们的 | 6.36% | 28.00% |
+| Bosch 的 | **23.38%** | **74.47%** |
+
+12 个场景无一例外。**把他们的地图换进来、保留我们的 agent → 21.27%/70.63%，基本追平**，
+所以差距全在地图侧，agent 侧没问题。逐项排除后：
+
+- 地图半径 150→100：无影响
+- 不发车道边界：无影响
+- 只留当前帧存在的 agent：无影响
+- 点密度 0.25m→1m（63k→15k 点）：**无影响**（5.60%→5.68%），但省 4 倍内存，已改
+- 地图类型编号重映射：无影响（见下）
+- **无效槽哨兵冲突：有影响，5.60%→8.99%**
+- **剩下的只剩 polygon 结构：我们 687 个 vs 他们 187 个**——我们把中心线/左边界/右边界发成
+  三个独立 polygon，Argoverse 格式是一条车道一个 polygon 装三条 polyline。还没改。
+
+**无效槽哨兵和 ego 撞了。** SMART 用 `position == 0` 当"无效"哨兵，而我们把坐标重心化到 ego 上，
+ego 自己就在 0——哨兵失效，且所有无效槽位都堆在 ego 身上污染 a2a 边。全局 UTM 下 0 在四百万米外
+不会撞（但回退坐标系会让 `interplating_polyline` 在浮点上退化报错，不是正确修法）。
+
+**跑他们的转换器要 `av2`**，`pip install --no-deps av2 universal-pathlib pathlib_abc`，
+再把 `cv2.typing` 用 sys.modules 桩掉（那只是类型标注，别升级环境里的 opencv 4.5.1）。
+他们的模块用 `nuplan.planning.training...` 命名空间互相 import，按文件路径加载后注册进 sys.modules 即可，
+不用装他们整个 fork。代码是 AGPL-3.0，只在 scratchpad 里跑对比，不进仓库。
+
 **Bosch 的 checkpoint 用的是 Argoverse 风格的地图类型编号，和原版 SMART(WOMD) 不一样。**
 他们走 nuPlan→argo→SMART 两段式，`_point_types` 表更短且顺序不同：CENTERLINE 是 11 不是 16，
 CROSSWALK 是 10 不是 15，车道边界是 0(DASHED_WHITE)/8(NONE)。checkpoint 本身能证实——
@@ -95,7 +124,7 @@ CROSSWALK 是 10 不是 15，车道边界是 0(DASHED_WHITE)/8(NONE)。checkpoin
 我们的转换器按 WOMD 编号发 12/15/16，**全部打在未训练的行上**。
 `converter.to_nuplan_checkpoint_semantics()` 做重映射，`SMARTAgents` 默认开启。
 
-**但这不是精度差距的原因——假设被自己的数据推翻了。** 重映射把 type embedding 平均范数
+**但这不是精度差距的原因——假设被自己的数据推翻了**（真正的原因见上面的 polygon 结构）。 重映射把 type embedding 平均范数
 从 0.109 提到 2.240（确认生效），next-token 准确率在 17816 个 token 上从 6.81%→6.65% (top-1)、
 30.07%→30.02% (top-10)，逐场景两个方向都是噪声。**地图类型 embedding 根本不承载信息，几何才承载。**
 改还是要改（给 checkpoint 喂没见过的索引是隐患），但别当成性能修复。
