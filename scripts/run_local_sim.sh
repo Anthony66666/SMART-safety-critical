@@ -25,9 +25,13 @@ LIMIT=${LIMIT:-2}
 CHALLENGE=${CHALLENGE:-closed_loop_nonreactive_agents}
 OUT=${OUT:-$BENCH/exp_local}
 
-# SMART's compiled extensions are CPU-only in this environment, and the model
-# is the bottleneck at roughly seven minutes per scenario. Ray's overhead is
-# pure cost at this scale, so run in-process.
+# SMART's compiled extensions are CPU-only in this environment -- data.pyg.org
+# is unreachable from here so torch_cluster and torch_scatter were built from
+# source without nvcc. torch.cuda.is_available() is still True, so the model
+# has to be told, or it fails inside radius_graph with "Not compiled with CUDA
+# support". The model is then the bottleneck at roughly seven minutes per
+# scenario, and Ray's overhead is pure cost at this scale, so run in-process.
+export SMART_DEVICE=${SMART_DEVICE:-cpu}
 OBS_ARG=""
 [ -n "$OBS" ] && OBS_ARG="observation=$OBS"
 

@@ -16,6 +16,12 @@ observation:
   _target_: smart.nuplan.smart_agents.build_smart_agents
   _convert_: 'all'
   checkpoint_path: ${oc.env:SMART_CHECKPOINT,checkpoints/bosch_nuplan_smart.ckpt}
+  # Where SMART runs. Overridable because the compiled torch_cluster and
+  # torch_scatter extensions decide this, not torch.cuda.is_available(): a
+  # CPU-only build of them fails inside the model with "Not compiled with CUDA
+  # support" on a machine whose GPU is perfectly available.
+  device: ${oc.env:SMART_DEVICE,cuda}
+
   replan_steps: 10
   map_radius: 150.0
 
