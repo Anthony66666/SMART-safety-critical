@@ -22,7 +22,7 @@ observation:
   # support" on a machine whose GPU is perfectly available.
   device: ${oc.env:SMART_DEVICE,cuda}
 
-  replan_steps: 10
+  replan_seconds: 0.5
   map_radius: 150.0
 
 # Seconds an occluded track survives in memory. Zero is per-frame, which is the

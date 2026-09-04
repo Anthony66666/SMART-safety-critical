@@ -41,12 +41,19 @@ from nuplan.planning.simulation.observation.observation_type import DetectionsTr
 from torch_geometric.data import HeteroData
 
 from smart.datasets.preprocess import TokenProcessor
-from smart.nuplan.converter import (AGENT_TYPE, AGENT_VEHICLE, NUPLAN_STRIDE,
-                                    WOMD_CURRENT_STEP, WOMD_STEPS, _convert_map,
+from smart.nuplan.converter import (AGENT_TYPE, AGENT_VEHICLE, WOMD_CURRENT_STEP,
+                                    WOMD_STEPS, _convert_map,
                                     to_nuplan_checkpoint_semantics)
 
 # SMART's history window: the current step plus everything before it.
 HISTORY_STEPS = WOMD_CURRENT_STEP + 1
+
+# SMART's own step. The simulation's step is a separate number and the two are
+# not reliably equal: nuPlan's raw logs are 20 Hz, but the official scenario
+# builder subsamples to 10 Hz, and the converter's scenarios do not. Assuming
+# either one is how the traffic ends up at half speed. The ratio is read from
+# the scenario at initialize time instead.
+SMART_STEP_S = 0.1
 
 # Only these three have a token vocabulary; everything else nuPlan tracks --
 # cones, barriers, debris -- is static and is replayed from the log untouched.
@@ -65,8 +72,10 @@ class SMARTAgents(AbstractObservation):
         model: a SMART LightningModule with weights already loaded.
         scenario: used for the map, for the static objects, and to seed the
             history before the simulation has one of its own.
-        replan_steps: simulation steps between rollouts. At 20 Hz, 10 is half a
-            second of predicted motion consumed per inference.
+        replan_seconds: seconds between rollouts. Half a second is what the
+            reference implementation uses. Lower is not obviously better:
+            successive rollouts disagree, and re-running constantly makes the
+            traffic jitter.
         map_radius: metres of map around the starting ego handed to the model.
         seed: makes the rollout reproducible, and identical between the
             occluded and unoccluded runs of the same scenario.
@@ -75,12 +84,15 @@ class SMARTAgents(AbstractObservation):
             through this repo's own WOMD preprocessing.
     """
 
-    def __init__(self, model, scenario, replan_steps: int = 10,
+    def __init__(self, model, scenario, replan_seconds: float = 0.5,
                  map_radius: float = 150.0, seed: int = 0,
                  checkpoint_semantics: bool = True, device: str = 'cuda'):
         self._model = model
         self._scenario = scenario
-        self._replan_steps = replan_steps
+        self._replan_seconds = replan_seconds
+        # Filled in at initialize, once the scenario can be asked its rate.
+        self._stride = 1
+        self._replan_steps = 1
         self._map_radius = map_radius
         self._seed = seed
         self._device = device
@@ -122,8 +134,12 @@ class SMARTAgents(AbstractObservation):
         # already been shown two seconds of the ego's logged future and has
         # started the traffic from where the log ends up, which is the kind of
         # leak that makes a closed-loop number meaningless.
-        step_time = getattr(self._scenario, 'database_interval', 0.05)
-        horizon = (HISTORY_STEPS - 1) * NUPLAN_STRIDE * step_time
+        # One SMART step per `stride` simulation steps. A 10 Hz simulation
+        # gives 1, a 20 Hz one gives 2.
+        step_time = getattr(self._scenario, 'database_interval', SMART_STEP_S)
+        self._stride = max(1, int(round(SMART_STEP_S / step_time)))
+        self._replan_steps = max(1, int(round(self._replan_seconds / step_time)))
+        horizon = (HISTORY_STEPS - 1) * SMART_STEP_S
         past_egos = list(self._scenario.get_ego_past_trajectory(
             0, horizon, HISTORY_STEPS - 1))
         past_objects = list(self._scenario.get_past_tracked_objects(
@@ -186,10 +202,10 @@ class SMARTAgents(AbstractObservation):
         self._iteration = next_iteration.index
         ego_state, _ = history.current_state
 
-        # The history SMART conditions on is at 10 Hz, so only every second
-        # simulation step contributes -- and the ego written in is the simulated
-        # one, which is the whole point of a reactive model.
-        if iteration.index % NUPLAN_STRIDE == 0:
+        # The history SMART conditions on is at its own rate, so only every
+        # `stride`-th simulation step contributes -- and the ego written in is
+        # the simulated one, which is the whole point of a reactive model.
+        if iteration.index % self._stride == 0:
             self._remember(ego_state, DetectionsTracks(TrackedObjects(
                 list(self._current.values()))))
 
@@ -316,16 +332,16 @@ class SMARTAgents(AbstractObservation):
     def _advance(self) -> None:
         """Move each agent onto the pose its rollout says it should be at.
 
-        SMART predicts at 10 Hz and nuPlan simulates at 20 Hz, so every
-        predicted pose covers two simulation steps. Holding each one for both
-        makes exactly half the steps a zero-length move: the traffic stutters,
-        and a planner reading velocity or time-to-collision off consecutive
-        frames sees agents that alternate between stopped and travelling at
-        twice their real speed. It shows up as a median vehicle speed of
-        exactly zero. Interpolating between the two poses instead costs
-        nothing and gives smooth motion.
+        Where the simulation runs faster than SMART, a predicted pose covers
+        several simulation steps. Holding it for all of them makes most steps a
+        zero-length move: the traffic stutters, and a planner reading velocity
+        or time-to-collision off consecutive frames sees agents that alternate
+        between stopped and travelling at several times their real speed. It
+        shows up as a median vehicle speed of exactly zero. Interpolating
+        between the two poses instead costs nothing and gives smooth motion.
+        At the usual 10 Hz the stride is 1 and this reduces to indexing.
         """
-        elapsed = (self._iteration - self._plan_start) / NUPLAN_STRIDE
+        elapsed = (self._iteration - self._plan_start) / self._stride
         index = int(elapsed)
         fraction = elapsed - index
         moved = {}

@@ -27,7 +27,7 @@ from nuplan.planning.simulation.simulation_time_controller.simulation_iteration 
     SimulationIteration,
 )
 
-from smart.nuplan.smart_agents import HISTORY_STEPS, NUPLAN_STRIDE, SMARTAgents
+from smart.nuplan.smart_agents import HISTORY_STEPS, SMART_STEP_S, SMARTAgents
 
 VEHICLE = TrackedObjectType.VEHICLE
 CONE = TrackedObjectType.TRAFFIC_CONE
@@ -54,10 +54,17 @@ def ego_at(x=0.0, y=0.0):
 
 
 class FakeScenario:
-    """Enough of a scenario for the observation to seed itself from."""
+    """Enough of a scenario for the observation to seed itself from.
 
-    def __init__(self, objects):
+    `database_interval` is the simulation's step, and it is not a constant:
+    nuPlan's official scenario builder subsamples the 20 Hz logs to 10 Hz while
+    the converter's scenarios stay at 20 Hz. The observation has to read it
+    rather than assume it.
+    """
+
+    def __init__(self, objects, database_interval=0.1):
         self.objects = objects
+        self.database_interval = database_interval
         self.map_api = SimpleNamespace(map_name='fake')
 
     def get_ego_state_at_iteration(self, iteration):
@@ -101,7 +108,7 @@ class StubModel:
         return {'pred_traj': traj, 'pred_head': torch.zeros(count, 80)}
 
 
-def make(objects, **kwargs):
+def make(objects, database_interval=0.1, **kwargs):
     """An observation whose model and map are stubs.
 
     The map needs a real nuPlan map API and the model needs an 85 MB
@@ -109,7 +116,7 @@ def make(objects, **kwargs):
     so `_agent_tensors` -- the part that has to match the layout the checkpoint
     was trained on -- is tested directly instead, below.
     """
-    scenario = FakeScenario(objects)
+    scenario = FakeScenario(objects, database_interval)
     observation = SMARTAgents(StubModel(), scenario, device='cpu', **kwargs)
     observation._build_map = lambda: {}
 
@@ -154,14 +161,37 @@ def test_history_records_the_simulated_ego_not_the_logged_one():
     assert observation._history[-1][0].center.y == 77.0
 
 
-def test_history_is_sampled_at_smart_rate_not_simulation_rate():
-    observation = make([agent('a', 10.0, 0.0)])
+def test_every_step_is_recorded_when_the_simulation_runs_at_smart_rate():
+    """nuPlan's closed-loop challenges step at 10 Hz, which is SMART's rate.
+
+    Assuming the 20 Hz of the raw logs instead samples the history at 5 Hz and
+    advances the agents at half speed, and neither shows up as an error.
+    """
+    observation = make([agent('a', 10.0, 0.0)], database_interval=0.1)
     observation.initialize()
+    assert observation._stride == 1
+    step(observation, 1, ego_at(50.0, 0.0))
+    assert observation._history[-1][0].center.x == 50.0
+
+
+def test_history_is_thinned_when_the_simulation_runs_faster_than_smart():
+    observation = make([agent('a', 10.0, 0.0)], database_interval=0.05)
+    observation.initialize()
+    assert observation._stride == 2
     before = observation._history[-1][0].center.x
-    step(observation, 1, ego_at(50.0, 0.0))   # odd index: not a 10 Hz frame
+    step(observation, 1, ego_at(50.0, 0.0))   # odd index: not a SMART frame
     assert observation._history[-1][0].center.x == before
     step(observation, 2, ego_at(60.0, 0.0))   # even index: recorded
     assert observation._history[-1][0].center.x == 60.0
+
+
+def test_the_history_window_spans_one_second_whatever_the_rate():
+    """SMART reads ten past steps at 10 Hz; the span is what matters."""
+    for interval in (0.05, 0.1):
+        observation = make([agent('a', 10.0, 0.0)], database_interval=interval)
+        observation.initialize()
+        assert len(observation._history) == HISTORY_STEPS
+        assert (HISTORY_STEPS - 1) * SMART_STEP_S == pytest.approx(1.0)
 
 
 def test_agents_move_to_the_predicted_pose():
@@ -260,11 +290,13 @@ def test_static_objects_get_no_row():
 
 
 def test_inference_runs_once_per_replan_interval():
-    observation = make([agent('a', 10.0, 0.0)], replan_steps=10)
+    """Half a second between rollouts, counted in seconds rather than steps."""
+    observation = make([agent('a', 10.0, 0.0)], replan_seconds=0.5)
     observation.initialize()
+    assert observation._replan_steps == 5      # 0.5 s at 10 Hz
     for index in range(20):
         step(observation, index, ego_at(float(index), 0.0))
-    assert observation._model.calls == 2
+    assert observation._model.calls == 4
 
 
 def test_agents_move_smoothly_between_predicted_poses():
