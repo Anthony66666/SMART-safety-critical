@@ -40,6 +40,31 @@ MODES=${MODES:-"baseline occluded"}
 # survivors, that read exactly like a result.
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 
+# "Finished running simulation" only means the runner's loop ended. It is
+# printed just as happily when every simulation inside it threw, which is how a
+# sweep once reported ok for a run where 911 of 1118 scenarios died of CUDA OOM
+# and scored the 207 survivors as though that were the result. A run counts as
+# done only if it finished *and* nearly everything in it succeeded.
+MAX_FAILURE_RATE=${MAX_FAILURE_RATE:-2}   # percent
+
+run_succeeded() {
+  local log=$1
+  grep -q "Finished running simulation" "$log" 2>/dev/null || return 1
+  local ok bad
+  ok=$(grep -oE 'Number of successful simulations: [0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
+  bad=$(grep -oE 'Number of failed simulations: [0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
+  [ -z "$ok" ] && return 1
+  bad=${bad:-0}
+  [ $(( (bad * 100) / (ok + bad) )) -le "$MAX_FAILURE_RATE" ]
+}
+
+failure_note() {
+  local log=$1 ok bad
+  ok=$(grep -oE 'Number of successful simulations: [0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
+  bad=$(grep -oE 'Number of failed simulations: [0-9]+' "$log" | tail -1 | grep -oE '[0-9]+$')
+  [ -n "$bad" ] && [ "${bad:-0}" -gt 0 ] && echo "${bad} of $(( ok + bad )) scenarios failed"
+}
+
 common_env() {
   # SEED only matters for the two sampling planners; the rest ignore it.
   echo "PLANNER=$1 REACTIVITY=$2 SEED=${SEED:-0} CFG_WEIGHT=${CFG_WEIGHT:-1.8}" \
@@ -61,7 +86,7 @@ for planner in $PLANNERS; do
   for react in $REACTIVITIES; do
     for mode in $MODES; do
       tag="${planner}_${react}_${mode}"
-      if grep -q "Finished running simulation" "$LOGS/$tag.log" 2>/dev/null; then
+      if run_succeeded "$LOGS/$tag.log"; then
         continue        # already scored; reported in the run loop below
       fi
       reason=$(env $(common_env "$planner" "$react") DRY_RUN=1 \
@@ -97,7 +122,7 @@ for planner in $PLANNERS; do
       log="$LOGS/$tag.log"
       # Skip anything already scored, so an interrupted sweep resumes instead
       # of repeating hours of work.
-      if grep -q "Finished running simulation" "$log" 2>/dev/null; then
+      if run_succeeded "$log"; then
         echo "skip  $tag  (already done)"; continue
       fi
       # Blocked combinations were reported in the preflight; do not spend a
@@ -108,8 +133,11 @@ for planner in $PLANNERS; do
       start=$SECONDS
       env $(common_env "$planner" "$react") \
         bash "$HERE/scripts/server/run_val14.sh" "$mode" > "$log" 2>&1
-      if grep -q "Finished running simulation" "$log"; then
+      if run_succeeded "$log"; then
         printf 'ok   %5d min\n' $(( (SECONDS - start) / 60 ))
+      elif note=$(failure_note "$log"); [ -n "$note" ]; then
+        failed=$((failed + 1))
+        printf 'FAILED -- %s\n' "$note"
       else
         failed=$((failed + 1))
         # Report the failure that stopped the run, not the first line in the
