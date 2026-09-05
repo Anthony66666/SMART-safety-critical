@@ -85,6 +85,11 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 # ways makes that 4.7 hours, thirty ways about 1.5. Each worker holds a CUDA
 # context of a few hundred MB, so thirty-odd fit in 46 GB with room to spare.
 # Whether the caller chose this matters below, so record it before defaulting.
+# This box cannot reach huggingface.co. Anything that tries -- timm fetching
+# ImageNet weights, a tokenizer, a config -- should go to the mirror instead of
+# retrying until it fails.
+export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+
 GPU_FRACTION_EXPLICIT=${GPU_FRACTION:+yes}
 GPU_FRACTION=${GPU_FRACTION:-0.03}
 THREADS=${THREADS:-64}
@@ -142,8 +147,10 @@ case "$REACTIVITY" in
                  # default lets ray pack 33 of them onto a card that also has
                  # other people's jobs on it -- which is exactly the CUDA OOM
                  # this hit, arriving as a torch error inside match_token_map
-                 # rather than as anything about scheduling. 0.1 caps it at ten.
-                 [ -n "$GPU_FRACTION_EXPLICIT" ] || GPU_FRACTION=0.1 ;;
+                 # rather than as anything about scheduling. How much
+                 # headroom is enough depends on the planner as well, so the
+                 # number is settled after the planner is known, below.
+                 SMART_GPU_BUDGET=yes ;;
     *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive | smart)" >&2; exit 1 ;;
 esac
 
@@ -293,7 +300,13 @@ case "$PLANNER" in
       urban_driver) MODEL=urban_driver_open_loop_model; CKPT=urbandriver_checkpoint.ckpt; EXTRA="" ;;
       gc_pgp)       MODEL=gc_pgp_model;                 CKPT=gc_pgp_checkpoint.ckpt
                     EXTRA="model.aggregator.pre_train=false" ;;
-      plancnn)      MODEL=raster_model;                 CKPT=plancnn_checkpoint.ckpt; EXTRA="" ;;
+      # raster_model defaults to pretrained=true, which sends timm to
+      # HuggingFace for ImageNet ResNet50 weights. This box cannot reach
+      # huggingface.co, so every plancnn run died in the model constructor --
+      # and the download is pointless anyway, since the plancnn checkpoint
+      # loaded a moment later overwrites all of it.
+      plancnn)      MODEL=raster_model;                 CKPT=plancnn_checkpoint.ckpt
+                    EXTRA="model.pretrained=false" ;;
     esac
     PLANNER_ARG="planner=ml_planner \
         planner.ml_planner.model_config=\${model} \
@@ -381,6 +394,20 @@ mkdir -p "$NUPLAN_EXP_ROOT"
 # be false: the published checkpoint is already exported EMA weights, a flat
 # state_dict, so the unwrap branch would look for an ema_state_dict that does
 # not exist.
+
+# With smart traffic the card holds one copy of the traffic model per ray
+# worker, and for most planners a copy of the planner's model too. 0.1 was
+# enough for the rule-based planners and for diffusion -- which still peaked at
+# 45 of 48 GB -- but urban_driver and gc_pgp went over. Splitting the two cases
+# keeps the cheap planners fast instead of slowing everything to the worst
+# case. Ray divides by the number of visible cards, so running on two halves
+# the pressure on each without changing throughput.
+if [ -n "${SMART_GPU_BUDGET:-}" ] && [ -z "$GPU_FRACTION_EXPLICIT" ]; then
+    case "$PLANNER" in
+        idm|pdm_closed) GPU_FRACTION=0.1 ;;
+        *)              GPU_FRACTION=0.2 ;;
+    esac
+fi
 
 # DRY_RUN resolves everything and checks the files the run would need, then
 # exits without simulating. The point is to find a missing checkpoint in a
