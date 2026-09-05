@@ -50,8 +50,12 @@ common_env() {
 # anything runs, so a missing checkpoint surfaces now rather than after the
 # hours of queue ahead of it. Planners that are not installed on this machine
 # are reported once and skipped, instead of failing eleven times over.
+# Counters rather than array lengths: under `set -u` bash 4 treats an empty
+# associative array as unbound, and ${#a[@]:-0} is not a legal substitution,
+# so the obvious guard is itself the bug.
 echo "preflight"
-runnable=()
+n_runnable=0
+n_blocked=0
 declare -A why_not
 for planner in $PLANNERS; do
   for react in $REACTIVITIES; do
@@ -63,21 +67,22 @@ for planner in $PLANNERS; do
       reason=$(env $(common_env "$planner" "$react") DRY_RUN=1 \
                  bash "$HERE/scripts/server/run_val14.sh" "$mode" 2>&1 >/dev/null)
       if [ -z "$reason" ]; then
-        runnable+=("$tag")
+        n_runnable=$((n_runnable + 1))
       else
+        n_blocked=$((n_blocked + 1))
         why_not["$tag"]=$(echo "$reason" | tr '\n' ';' | sed 's/;$//')
       fi
     done
   done
 done
 
-if [ ${#why_not[@]} -gt 0 ]; then
+if [ "$n_blocked" -gt 0 ]; then
   echo "  not runnable here:"
   for tag in $(printf '%s\n' "${!why_not[@]}" | sort); do
     printf '    %-38s %s\n' "$tag" "${why_not[$tag]}"
   done
 fi
-echo "  ${#runnable[@]} runnable, ${#why_not[@]} blocked"
+echo "  $n_runnable runnable, $n_blocked blocked"
 echo
 
 if [ -n "${CHECK_ONLY:-}" ]; then
