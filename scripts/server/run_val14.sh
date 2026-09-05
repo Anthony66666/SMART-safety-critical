@@ -372,6 +372,33 @@ mkdir -p "$NUPLAN_EXP_ROOT"
 # state_dict, so the unwrap branch would look for an ema_state_dict that does
 # not exist.
 
+# DRY_RUN resolves everything and checks the files the run would need, then
+# exits without simulating. The point is to find a missing checkpoint in a
+# second rather than after the queue ahead of it has finished -- and to keep
+# that knowledge here, where the paths are actually built, instead of copied
+# into the sweep script where it would drift.
+if [ -n "${DRY_RUN:-}" ]; then
+    missing=0
+    # Every argument of the form key=/absolute/path names a file or directory
+    # the run will open.
+    for token in $PLANNER_ARG $OBSERVATION; do
+        case "$token" in
+            *=/*) path=${token#*=}
+                  if [ ! -e "$path" ]; then
+                      echo "  missing: $path" >&2; missing=1
+                  fi ;;
+        esac
+    done
+    if [ "$REACTIVITY" = smart ]; then
+        ckpt=${SMART_CHECKPOINT:-$BENCH/checkpoints/bosch_nuplan_smart.ckpt}
+        [ -e "$ckpt" ] || { echo "  missing: $ckpt" >&2; missing=1; }
+        $PY -c 'import torch_geometric, torch_scatter, torch_cluster' 2>/dev/null \
+            || { echo "  missing: torch_geometric/scatter/cluster" >&2; missing=1; }
+    fi
+    [ -d "$VAL_SPLIT" ] || { echo "  missing: $VAL_SPLIT" >&2; missing=1; }
+    exit $missing
+fi
+
 $PY "$DEVKIT/nuplan/planning/script/run_simulation.py" \
     +simulation=$CHALLENGE \
     $PLANNER_ARG \
