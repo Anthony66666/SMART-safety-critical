@@ -439,8 +439,17 @@ def resolve_checkpoint(checkpoint_path: str) -> str:
         f'SMART_CHECKPOINT to an absolute path.')
 
 
+_MODEL_CACHE: Dict[tuple, object] = {}
+
+
 def load_smart(checkpoint_path: str, device: str = 'cuda'):
     """Build SMART from a checkpoint, using the config stored inside it.
+
+    Cached per (checkpoint, device) for the life of the process. nuPlan builds
+    an observation per scenario, so without this a ray worker reloads the same
+    85 MB checkpoint and re-uploads it to the card for every one of the ~220
+    scenarios it handles. The model is read-only here -- eval mode, no_grad,
+    no buffers written -- so one copy serves every scenario in the worker.
 
     Lightning saves the model config under `hyper_parameters`, so the
     architecture is read from the same file as the weights. Passing a separate
@@ -450,6 +459,9 @@ def load_smart(checkpoint_path: str, device: str = 'cuda'):
     from smart.model import SMART
 
     checkpoint_path = resolve_checkpoint(checkpoint_path)
+    cached = _MODEL_CACHE.get((checkpoint_path, device))
+    if cached is not None:
+        return cached
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     model = SMART(checkpoint['hyper_parameters']['model_config'])
     missing, unexpected = model.load_state_dict(checkpoint['state_dict'], strict=False)
@@ -457,7 +469,9 @@ def load_smart(checkpoint_path: str, device: str = 'cuda'):
         raise RuntimeError(
             f'checkpoint does not match the model it declares: {len(missing)} '
             f'missing and {len(unexpected)} unexpected parameters')
-    return model.eval().to(device)
+    model = model.eval().to(device)
+    _MODEL_CACHE[(checkpoint_path, device)] = model
+    return model
 
 
 def build_smart_agents(scenario, checkpoint_path: str, device: str = 'cuda',

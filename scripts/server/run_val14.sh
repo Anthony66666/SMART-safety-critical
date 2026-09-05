@@ -403,10 +403,29 @@ mkdir -p "$NUPLAN_EXP_ROOT"
 # case. Ray divides by the number of visible cards, so running on two halves
 # the pressure on each without changing throughput.
 if [ -n "${SMART_GPU_BUDGET:-}" ] && [ -z "$GPU_FRACTION_EXPLICIT" ]; then
-    case "$PLANNER" in
-        idm|pdm_closed) GPU_FRACTION=0.1 ;;
-        *)              GPU_FRACTION=0.2 ;;
-    esac
+    # A fixed fraction cannot work here: it encodes an assumption about how
+    # much of the card is ours, and on a shared box that assumption is wrong
+    # within the hour. Measured, one worker running smart traffic wants about
+    # 7.5 GB -- not the 1.25 GB the sequential smoke test suggested, because
+    # that run had one worker and no planner model beside it. The budget is
+    # therefore computed from the memory actually free at launch.
+    #
+    # This is what the earlier failures were: 0.2 asked for five workers on a
+    # 46 GB card that a neighbouring job had already taken 29 GB of, so the
+    # allocation died 48 seconds in, on a 2 MiB request.
+    SMART_WORKER_MIB=${SMART_WORKER_MIB:-8000}
+    free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits \
+                 -i "${CUDA_VISIBLE_DEVICES:-0}" 2>/dev/null | head -1 | tr -d ' ')
+    if [ -n "$free_mib" ]; then
+        # Leave one worker's worth of slack for the neighbours to grow into.
+        slots=$(( (free_mib - SMART_WORKER_MIB) / SMART_WORKER_MIB ))
+        [ "$slots" -lt 1 ] && slots=1
+        [ "$slots" -gt 8 ] && slots=8
+        GPU_FRACTION=$(awk -v n="$slots" 'BEGIN { printf "%.3f", 1.0 / n }')
+        echo "smart traffic: ${free_mib} MiB free, ${slots} concurrent (GPU_FRACTION=$GPU_FRACTION)"
+    else
+        GPU_FRACTION=0.34
+    fi
 fi
 
 # DRY_RUN resolves everything and checks the files the run would need, then
