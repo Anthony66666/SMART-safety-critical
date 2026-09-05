@@ -21,9 +21,12 @@ from collections import defaultdict
 
 import pandas as pd
 
-# experiment_uid is "<planner>/<split>/<reactivity>/<mode>/<timestamp>"
+# experiment_uid is "<planner>/<split>/<reactivity>/<mode>/<timestamp>".
+# The reactivity list has to include every value run_val14.sh accepts: an
+# unlisted one does not raise, it just fails to match, and the runs vanish from
+# the table as though they had never happened.
 PATTERN = re.compile(r'/([^/]+)/(val14|test14-hard|test14-random)/'
-                     r'(nonreactive|reactive)/(baseline|occluded|random)/')
+                     r'(nonreactive|reactive|smart)/(baseline|occluded|random)/')
 
 
 def collect(root):
