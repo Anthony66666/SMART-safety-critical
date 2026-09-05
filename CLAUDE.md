@@ -170,7 +170,52 @@ CROSSWALK 是 10 不是 15，车道边界是 0(DASHED_WHITE)/8(NONE)。checkpoin
 **SMART 的历史窗口必须取过去，不能从 iteration 0 往后读。** 往后读等于开局就把 ego 两秒的
 日志未来喂给模型。用 `get_ego_past_trajectory` / `get_past_tracked_objects`。
 
+**冒烟测试必须在真实执行模式下跑，否则它给的保证是假的。** 这条踩了两次，都是同一个原因：
+`LIMIT` 一设，`run_val14.sh` 就把 worker 从 `ray_distributed` 换成 `sequential`（有正当理由——
+Ray 会吞掉 worker 的 traceback）。于是冒烟验证的是"SMART 能跑"，而实际要跑的是"33 个 SMART 同时跑"。
+
+后果一：服务器上三个 bug 里两个只在并发下出现，冒烟全部漏掉。
+后果二：我拿顺序冒烟测出的单 worker 显存 **1.25 GB** 去推算并发数，实测是 **7.5 GB**，错了 6 倍——
+那次只有一个 worker、旁边没有 planner 模型，测的是实际运行中不存在的情形。
+
+**"Finished running simulation" 不等于跑成功。** 它只说明 runner 的循环结束了。曾经
+911/1118 个场景 OOM 挂掉，sweep 照样报 `ok 57 min`，剩下 207 个幸存场景算出 70.66 分——
+读起来完全像个结果，而且下次还会被当成"已完成"跳过。`sweep_val14.sh` 的判据现在要求失败率 < 2%。
+**用那个假的 57 分钟做过时间估算，结论错了 5 倍**（失败的场景秒退，健康的要 3-5 小时）。
+
+**`GPU_FRACTION` 这类静态比例在共享机器上必然失效。** 它隐含假设整张卡都是我们的。
+smart 交通下每个 ray worker 各加载一份模型，0.2 要开 5×7.5=37 GB，而卡上别人已占 29 GB，
+**48 秒后死在一个 2 MiB 的分配上**。现在启动时读 `nvidia-smi` 空闲显存算并发数，留一个 worker 余量。
+
+**显存持续上涨不是泄漏，是分配器碎片。** 一个 worker 三小时从 6 GB 涨到 44 GB，看着像泄漏。
+本地同一份代码连跑 5 个场景：RSS 在第一个后完全持平，活 tensor 恒定 832 个——**没有任何东西被泄漏**。
+真因是不同场景的 agent 数和地图大小不同，分配器留着无法复用的块。
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 解决。最直观的解读是错的，别去找悬空引用。
+
+**SMART 的 rollout 长度由输入的时间轴决定**：`num_recurrent_steps = 输入步数 − 历史步数`。
+按 WOMD 的 91 步建输入等于要 8 秒未来（16 个 token 步），而 `replan_seconds=0.5` 用完就重推理——
+**15/16 白算**。截断是免费的不是近似：模型自回归，要 80/40/20/10 步未来时前 10 步的预测
+**逐位相同（0.000000000 m）**，耗时 5.7s→1.6s。现在按 `replan_seconds` 定长度，91→21 步。
+Bosch 的实现有同样的浪费（`inference()` 后 `[:, :5]`），这不是路线差异，是两边都没做的优化。
+
+**模型和词表都要按进程缓存。** nuPlan 每个场景构建一次 observation，所以 `build_smart_agents`
+每场景重新加载 85 MB checkpoint、`TokenProcessor` 每场景重读 2.2 MB 词表——每 worker 约 220 次。
+两者推理时都是只读的。
+
+**plancnn 的 `raster_model` 默认 `pretrained=true`**，会让 timm 去 HuggingFace 下 ImageNet 权重，
+服务器连不上，死在模型构造函数里。而且那些权重随后就被 plancnn 自己的 checkpoint 覆盖，**本来就白下**。
+用 `model.pretrained=false`。
+
+**Ray 的遥测报错是红鲱鱼。** `RpcError: Running out of retries to initialize the metrics agent`
+说的是 Ray 自己的 telemetry exporter 没连上，同一行里就写着 "Metrics will not be exported"，无害，
+几乎每次运行都出现。它排在日志最前面，所以"取第一个匹配 Error 的字符串"会把它当成失败原因，
+把诊断带偏——真正的异常在 `Simulation failed` 之后。
+
+**`table.py` 的路径正则要和 `run_val14.sh` 的反应性列表同步。** 加了 `smart` 却没加进正则，
+结果是**已经跑完并评分的 run 静默不出现在表里**——不报错，就是没有。
+
 **性能**：瓶颈在 CPU（nuPlan 地图查询约 296 ms/步），不在 GPU。遮挡本身只加约 5%。
+一个健康的 SMART 交通全量 run（1118 场景）约 3.5-5 小时。
 
 ## 常用命令
 
