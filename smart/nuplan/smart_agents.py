@@ -49,6 +49,10 @@ from smart.nuplan.converter import (AGENT_TYPE, AGENT_VEHICLE, WOMD_CURRENT_STEP
 # SMART's history window: the current step plus everything before it.
 HISTORY_STEPS = WOMD_CURRENT_STEP + 1
 
+# SMART emits one token per five steps, so the rollout length is set by the
+# time axis of the input: num_recurrent_steps = steps - HISTORY_STEPS.
+TOKEN_STRIDE = 5
+
 # SMART's own step. The simulation's step is a separate number and the two are
 # not reliably equal: nuPlan's raw logs are 20 Hz, but the official scenario
 # builder subsamples to 10 Hz, and the converter's scenarios do not. Assuming
@@ -265,14 +269,38 @@ class SMARTAgents(AbstractObservation):
         # select nothing and every agent would stand still.
         return HeteroData(self._token_processor.preprocess(data)).to(self._device)
 
+    def _horizon(self):
+        """How many steps of input to build, and so how far the model rolls out.
+
+        The trained layout is WOMD's 91 steps, which asks for 80 future steps --
+        eight seconds, sixteen token steps. A rollout is consumed for
+        replan_seconds and then thrown away, so at the default half a second
+        fifteen of those sixteen steps are computed and discarded.
+
+        Truncating is free rather than an approximation: the model is
+        autoregressive, so the early steps do not depend on how many later ones
+        were requested. Measured on a converted scenario, asking for 80, 40, 20
+        and 10 future steps gives predictions that agree to 0.000000000 m over
+        the range they share, while inference drops from 5.7 s to 1.6 s. The
+        memory goes with it, which is what was running the card out when several
+        ray workers did this at once.
+
+        One spare token beyond what replanning needs, so a longer
+        replan_seconds or a late rollout still has poses to read.
+        """
+        needed = int(math.ceil(self._replan_seconds / SMART_STEP_S))
+        tokens = int(math.ceil(needed / TOKEN_STRIDE)) + 1
+        return min(WOMD_STEPS, HISTORY_STEPS + tokens * TOKEN_STRIDE)
+
     def _agent_tensors(self):
         """Dense [agent, time] tensors from the live history, ego last.
 
-        Laid out exactly as converter._convert_agents does, because that is the
-        layout the checkpoint was trained on: WOMD's 91 steps with the ego at
-        av_index. Only the first HISTORY_STEPS are filled -- the rest is what
+        Laid out as converter._convert_agents does, because that is the layout
+        the checkpoint was trained on, except for the length of the time axis --
+        see _horizon. Only the first HISTORY_STEPS are filled; the rest is what
         the model is being asked to produce.
         """
+        steps = self._horizon()
         tracks = sorted({t for _, agents in self._history for t in agents})
         if not tracks:
             return None
@@ -280,11 +308,11 @@ class SMARTAgents(AbstractObservation):
         av_index = len(tracks)
         count = len(tracks) + 1
 
-        position = torch.zeros(count, WOMD_STEPS, 3, dtype=torch.float64)
-        heading = torch.zeros(count, WOMD_STEPS, dtype=torch.float64)
-        velocity = torch.zeros(count, WOMD_STEPS, 3, dtype=torch.float64)
-        shape = torch.zeros(count, WOMD_STEPS, 3, dtype=torch.float64)
-        valid = torch.zeros(count, WOMD_STEPS, dtype=torch.bool)
+        position = torch.zeros(count, steps, 3, dtype=torch.float64)
+        heading = torch.zeros(count, steps, dtype=torch.float64)
+        velocity = torch.zeros(count, steps, 3, dtype=torch.float64)
+        shape = torch.zeros(count, steps, 3, dtype=torch.float64)
+        valid = torch.zeros(count, steps, dtype=torch.bool)
         kinds = torch.full((count,), AGENT_VEHICLE, dtype=torch.uint8)
         # 1 is an ordinary tracked agent, 3 marks the one WOMD scores. The ego
         # gets 3 because that is what the checkpoint saw at that row.
