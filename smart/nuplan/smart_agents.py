@@ -103,7 +103,7 @@ class SMARTAgents(AbstractObservation):
         self._seed = seed
         self._device = device
         self._checkpoint_semantics = checkpoint_semantics
-        self._token_processor = TokenProcessor(2048)
+        self._token_processor = _tokenizer(2048)
 
         self._map: Optional[Dict] = None
         self._origin = (0.0, 0.0)
@@ -468,6 +468,23 @@ def resolve_checkpoint(checkpoint_path: str) -> str:
 
 
 _MODEL_CACHE: Dict[tuple, object] = {}
+_TOKENIZER_CACHE: Dict[int, TokenProcessor] = {}
+
+
+def _tokenizer(token_size: int) -> TokenProcessor:
+    """One tokenizer per vocabulary size, for the life of the process.
+
+    TokenProcessor reads 2.2 MB of pickled vocabulary in its constructor, and
+    nuPlan builds an observation per scenario, so a ray worker was re-reading
+    those files for every one of the ~220 scenarios it handles. It holds no
+    per-scenario state -- preprocess() takes the data as an argument -- so one
+    instance serves all of them.
+    """
+    tokenizer = _TOKENIZER_CACHE.get(token_size)
+    if tokenizer is None:
+        tokenizer = TokenProcessor(token_size)
+        _TOKENIZER_CACHE[token_size] = tokenizer
+    return tokenizer
 
 
 def load_smart(checkpoint_path: str, device: str = 'cuda'):

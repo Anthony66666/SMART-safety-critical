@@ -85,6 +85,15 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 # ways makes that 4.7 hours, thirty ways about 1.5. Each worker holds a CUDA
 # context of a few hundred MB, so thirty-odd fit in 46 GB with room to spare.
 # Whether the caller chose this matters below, so record it before defaulting.
+# Scenes vary in agent count and map size, so every scenario asks the caching
+# allocator for a slightly different set of block sizes. It keeps what it
+# cannot reuse, and the reserved memory climbs even though the live memory does
+# not -- one worker went from 6 GB to 44 GB over three hours while a local
+# replay of the same code showed flat RSS and a constant live-tensor count, so
+# the growth is fragmentation rather than anything being leaked. Expandable
+# segments let the allocator resize and reuse across shapes instead.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+
 # This box cannot reach huggingface.co. Anything that tries -- timm fetching
 # ImageNet weights, a tokenizer, a config -- should go to the mirror instead of
 # retrying until it fails.
