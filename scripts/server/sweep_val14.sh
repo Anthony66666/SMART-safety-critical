@@ -112,7 +112,17 @@ for planner in $PLANNERS; do
         printf 'ok   %5d min\n' $(( (SECONDS - start) / 60 ))
       else
         failed=$((failed + 1))
-        printf 'FAILED -- %s\n' "$(grep -m1 -oE '[A-Za-z.]*(Error|Exception)[^"]{0,60}' "$log" | head -1)"
+        # Report the failure that stopped the run, not the first line in the
+        # log that contains the word Error. Ray announces that its telemetry
+        # exporter could not start on almost every run -- harmless, it says so
+        # itself -- and taking the first match reported that instead of the
+        # CUDA OOM further down, which sent a diagnosis off in the wrong
+        # direction for a while.
+        reason=$(grep -A 30 'Simulation failed: with the following trace' "$log" 2>/dev/null \
+                   | grep -oE '[A-Za-z_.]*(Error|Exception): [^"]{0,70}' | head -1)
+        [ -z "$reason" ] && reason=$(grep -oE '[A-Za-z_.]*(Error|Exception): [^"]{0,70}' "$log" \
+                                       | grep -v 'metrics agent' | head -1)
+        printf 'FAILED -- %s\n' "${reason:-see $log}"
       fi
     done
   done

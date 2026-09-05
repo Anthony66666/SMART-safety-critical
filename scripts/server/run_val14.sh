@@ -84,6 +84,8 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 # scenario takes about 2.5 minutes, so 1118 of them is ~47 hours serial; ten
 # ways makes that 4.7 hours, thirty ways about 1.5. Each worker holds a CUDA
 # context of a few hundred MB, so thirty-odd fit in 46 GB with room to spare.
+# Whether the caller chose this matters below, so record it before defaulting.
+GPU_FRACTION_EXPLICIT=${GPU_FRACTION:+yes}
 GPU_FRACTION=${GPU_FRACTION:-0.03}
 THREADS=${THREADS:-64}
 
@@ -133,7 +135,15 @@ case "$REACTIVITY" in
                  BASE_OBS=""; OCCLUDED_OBS=occluded_idm_agents_observation ;;
     smart)       CHALLENGE=closed_loop_reactive_agents
                  BASE_OBS=smart_agents_observation
-                 OCCLUDED_OBS=occluded_smart_agents_observation ;;
+                 OCCLUDED_OBS=occluded_smart_agents_observation
+                 # Every ray worker loads its own copy of the traffic model, so
+                 # here the GPU budget is set by the observation rather than by
+                 # the planner. One worker measured 1250 MiB, and the 0.03
+                 # default lets ray pack 33 of them onto a card that also has
+                 # other people's jobs on it -- which is exactly the CUDA OOM
+                 # this hit, arriving as a torch error inside match_token_map
+                 # rather than as anything about scheduling. 0.1 caps it at ten.
+                 [ -n "$GPU_FRACTION_EXPLICIT" ] || GPU_FRACTION=0.1 ;;
     *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive | smart)" >&2; exit 1 ;;
 esac
 
