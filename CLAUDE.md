@@ -42,6 +42,11 @@ export HTTPS_PROXY="http://${WH}:7897" HTTP_PROXY="$HTTPS_PROXY" https_proxy="$H
 
 `git push` 经常撞 TLS 握手失败，设了代理重试即可。
 
+**但代理开着就连不上服务器。** Clash Verge 的 TUN 模式（`enable_tun_mode: true`）在网络层截
+TCP，去 `172.18.37.114` 这种内网地址的流量也一并截走，而代理出不去内网。症状具有迷惑性：
+`ping` 是 ICMP，走另一条路径，**照样通**。要么 `proxy_off` 并关掉 TUN，要么在 Clash 里给
+`172.18.0.0/16` 加直连规则。拉外网和连服务器这两件事得分开做。
+
 ## 服务器（val14 全量评测）
 
 `ssh l40s`，4×L40S + 192 CPU，`$HOME=/lab/haoq_lab/12432702`。**SSH 很不稳，经常超时，重试几次**。
@@ -51,12 +56,27 @@ export HTTPS_PROXY="http://${WH}:7897" HTTP_PROXY="$HTTPS_PROXY" https_proxy="$H
 - 连不上 huggingface.co，用 `hf-mirror.com`
 - 环境 `~/miniforge3/envs/flow_planner`
 
+**手动调 `run_val14.sh` 一定要带 `VAL_SPLIT`。** val14 在 NAS 上读极慢，本地副本在
+`~/occlusion-bench/val14_local`（328 个 .db，87G）。`sweep_val14.sh` 有默认值所以看不出问题，
+但直接调 `run_val14.sh` 时它会回退到探测，探到 NAS 路径就照跑不误——**不报错，只是慢到不可用**。
+症状是进程 `Dl` 状态、`/proc/PID/wchan` 显示 `rpc_wait_bit_killable`，几十分钟零产出。
+同一个 4 场景冒烟：NAS 上 24 分钟没跑完，本地副本 6 分钟结束。
+
 ```bash
+export VAL_SPLIT=$HOME/occlusion-bench/val14_local   # 先设这个，否则会走 NAS
+
 bash scripts/server/setup_val14.sh                              # 一次性
+CHECK_ONLY=1 bash scripts/server/sweep_val14.sh                 # 预检，几秒钟看清缺什么
 CUDA_VISIBLE_DEVICES=3 LIMIT=4 bash scripts/server/run_val14.sh baseline   # 冒烟
-CUDA_VISIBLE_DEVICES=3 bash scripts/server/run_val14.sh baseline           # 全量
+bash scripts/server/sweep_val14.sh                              # 全量，出总表
 python scripts/server/score.py ~/occlusion-bench/exp --by-type
 ```
+
+跑之前先 `CHECK_ONLY=1` 过一遍预检。它用 `run_val14.sh` 的 `DRY_RUN=1` 解析每个组合、
+检查要打开的文件，缺权重几秒钟就报出来，而不是排队几小时后在启动时失败。
+
+服务器上没有 `tmux` 和 `rsync`。后台用 `setsid nohup ... < /dev/null &`，传目录用
+`tar czf - dir | ssh l40s "tar xzf - -C /path"`。
 
 **验收线：baseline 必须接近 Flow Planner 已发表的 90.43（Val14 非反应式）。对不上就别看遮挡的数字**——harness 不可信的话，差值没有意义。
 
