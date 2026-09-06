@@ -26,7 +26,8 @@ WORK=${WORK:-$HOME/occlusion-bench}
 BENCH=${BENCH:-$HOME/SMART-safety-critical}   # this repository, for the wrapper
 
 PY="$CONDA/envs/$ENV_NAME/bin/python"
-DEVKIT="$WORK/nuplan-devkit"
+# Overridable like the rest: the laptop keeps the devkit outside the workspace.
+DEVKIT=${DEVKIT:-$WORK/nuplan-devkit}
 
 # These are probed rather than taken from the environment. A shell that has
 # already exported NUPLAN_DATA_ROOT -- pointing at the versioned directory
