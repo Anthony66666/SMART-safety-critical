@@ -423,7 +423,12 @@ if [ -n "${SMART_GPU_BUDGET:-}" ] && [ -z "$GPU_FRACTION_EXPLICIT" ]; then
     # This is what the earlier failures were: 0.2 asked for five workers on a
     # 46 GB card that a neighbouring job had already taken 29 GB of, so the
     # allocation died 48 seconds in, on a 2 MiB request.
-    SMART_WORKER_MIB=${SMART_WORKER_MIB:-8000}
+    # Measured, not guessed: workers on a live run hold 4.4-5.0 GB each once
+    # the rollout is truncated to what replanning consumes. The 8000 this
+    # started at was taken from a reading made before that change and left half
+    # the card idle. A single worker alone peaks at 1.8 GB; the rest is the per
+    # process CUDA context and the planner's own model.
+    SMART_WORKER_MIB=${SMART_WORKER_MIB:-5500}
     free_mib=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits \
                  -i "${CUDA_VISIBLE_DEVICES:-0}" 2>/dev/null | head -1 | tr -d ' ')
     if [ -n "$free_mib" ]; then
