@@ -45,8 +45,19 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 # smoke test, read the peak, and set it.
 export SMART_WORKER_MIB=${SMART_WORKER_MIB:-3000}
 
-mkdir -p "$WORK"
+mkdir -p "$WORK/checkpoints"
 [ -e "$WORK/nuplan-devkit" ] || ln -s "$DEVKIT" "$WORK/nuplan-devkit" 2>/dev/null || true
+
+# run_val14.sh looks for checkpoints under $WORK/checkpoints in the layout the
+# server happens to have. This repository keeps them one directory deeper and
+# under different names, so the difference is bridged with links rather than by
+# copying 400 MB or by teaching the runner about a second layout.
+link() { [ -e "$2" ] || [ ! -e "$1" ] || ln -s "$1" "$2" 2>/dev/null || true; }
+link "$BENCH/checkpoints/tuplan"                              "$WORK/checkpoints/tuplan"
+link "$BENCH/checkpoints/diffusion_planner"                   "$WORK/checkpoints/diffusion"
+link "$BENCH/checkpoints/flow_planner/model.pth"              "$WORK/checkpoints/model.pth"
+link "$BENCH/checkpoints/flow_planner/model_config_resolved.yaml" \
+     "$WORK/checkpoints/model_config_resolved.yaml"
 
 echo "local run: split=$SPLIT reactivity=${REACTIVITY:-nonreactive} mode=${1:-baseline}"
 echo "  data   : $VAL_SPLIT"
