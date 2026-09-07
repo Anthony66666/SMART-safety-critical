@@ -233,15 +233,29 @@ class SMARTAgents(AbstractObservation):
         already been driven away would teleport it back to wherever the log
         says it is, which is not where the simulation put it.
 
-        A newcomer is backfilled into the history window from the log. Not
-        because SMART needs the full second -- an ablation over 11k tokens puts
-        the three anchor steps it actually reads at 21.43% next-token top-1
-        against 21.62% for everything, which is noise. The one case that does
-        cost is a history showing no motion at all: 20.39%, and 65.10% on
-        top-10 against 70.60%. A newcomer dropped in with a single frame is
-        exactly that case, so it would be read as parked and then have to
-        accelerate from rest. The log has its real past, so backfilling is
-        cheaper than any approximation of it.
+        A newcomer needs a full history window, and the log cannot supply one:
+        a track is new precisely because the log did not have it before, so
+        reading its past back gives holes. Measured, that left newcomers with 5
+        to 7 valid steps of 11 against everyone else's 11, and -- what actually
+        breaks -- only 26-30% of them had all three of the steps the tokenizer
+        reads, against 96-97% for the rest. SMART builds its motion tokens from
+        fixed anchors at steps 0, 5 and 10; miss those and the token degenerates,
+        which is what the sideways and reversing newcomers were.
+
+        So the history is synthesised rather than looked up: the agent is
+        carried backwards at the velocity it arrives with. That is not a
+        cosmetic choice either way -- an ablation over 11k tokens puts a
+        constant-velocity reconstruction at 20.93% next-token top-1 against
+        21.62% for real history, and a history with no motion in it at 20.39%
+        and 65.10% on top-10 against 70.60%. The reconstruction costs 0.7
+        points; the holes cost 5.5. And for the 40.6% of arrivals that are
+        stationary, carrying them backwards at zero velocity is exact.
+
+        Nothing is admitted into occupied space. Seventy percent of arrivals
+        landed within three metres of an existing agent, because the log's pose
+        is where the log's traffic is and ours has moved on. nuPlan's own IDM
+        builder does the same check when it places agents, and skipping is
+        cheap: the space clears and the next step tries again.
         """
         if self._scenario is None:
             return
@@ -255,27 +269,35 @@ class SMARTAgents(AbstractObservation):
         if not entering:
             return
 
+        occupied = [(o.box.center.x, o.box.center.y,
+                     0.5 * max(o.box.length, o.box.width))
+                    for o in self._current.values()]
+
         for obj in entering:
+            x, y = obj.box.center.x, obj.box.center.y
+            reach = 0.5 * max(obj.box.length, obj.box.width)
+            if any((x - ox) ** 2 + (y - oy) ** 2 < (reach + orad) ** 2
+                   for ox, oy, orad in occupied):
+                continue          # try again next step, once the space clears
             track = _track_id(obj)
             self._current[track] = obj
             self._templates.setdefault(track, obj)
             self._admitted.add(track)
+            occupied.append((x, y, reach))
+            self._synthesise_history(track, obj)
 
-        # Backfill: history frame j sits `(len - 1 - j) * stride` iterations
-        # back from now, so each one can be read straight out of the log.
-        wanted = {_track_id(o) for o in entering}
+    def _synthesise_history(self, track: str, obj) -> None:
+        """Fill the whole window by carrying the agent back at its velocity."""
+        velocity = getattr(obj, 'velocity', None)
+        vx = velocity.x if velocity is not None else 0.0
+        vy = velocity.y if velocity is not None else 0.0
         last = len(self._history) - 1
         for j, (_, agents) in enumerate(self._history):
-            iteration = self._iteration - (last - j) * self._stride
-            if iteration < 0:
-                continue
-            try:
-                past = self._scenario.get_tracked_objects_at_iteration(iteration)
-            except Exception:
-                continue
-            for obj in past.tracked_objects:
-                if _track_id(obj) in wanted:
-                    agents[_track_id(obj)] = obj
+            back = (last - j) * self._stride * self._step_time
+            pose = StateSE2(obj.box.center.x - vx * back,
+                            obj.box.center.y - vy * back,
+                            obj.box.center.heading)
+            agents[track] = self._at_pose(obj, pose, velocity)
 
     def _retire_distant_agents(self, ego_state) -> None:
         """Drop agents that have left the ego's neighbourhood for good."""
@@ -496,8 +518,12 @@ class SMARTAgents(AbstractObservation):
                     (pose.x - previous.box.center.x) / self._step_time,
                     (pose.y - previous.box.center.y) / self._step_time)
             moved[track] = self._at_pose(template, pose, velocity)
-        if moved:
-            self._current = moved
+        # Update the agents that have a plan; leave the rest where they are.
+        # Replacing the whole dict dropped anything admitted since the last
+        # rollout -- for up to half a second -- and _remember then wrote that
+        # absence into the history window as a hole at exactly the anchor steps
+        # the tokenizer reads.
+        self._current.update(moved)
 
     @staticmethod
     def _at_pose(original, pose: StateSE2, velocity=None):
