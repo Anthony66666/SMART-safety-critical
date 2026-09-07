@@ -344,6 +344,12 @@ case "$PLANNER" in
     # makes its absolute score incomparable with the other planners -- but the
     # gap is not, since both of its conditions use the same controller.
     CARL_ROOT=${CARL_ROOT:-$WORK/CaRL/nuPlan}
+    # Its configs are reached as pkg://carl_nuplan..., which needs the package
+    # importable -- the repository is a checkout rather than an installed
+    # distribution, so the checkout has to be on PYTHONPATH. Without it hydra
+    # reports the challenge config as missing, which reads like a typo in the
+    # challenge name rather than a package that is not on the path.
+    export PYTHONPATH="$CARL_ROOT:${PYTHONPATH:-}"
     CHALLENGE="${CHALLENGE}_action"
     PLANNER_ARG="planner=ppo_planner \
         planner.ppo_planner.checkpoint_path=$CARL_ROOT/checkpoints/${CARL_CKPT:-nuplan_51892_1B}/model_best.pth"
