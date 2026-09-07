@@ -26,7 +26,7 @@ import pandas as pd
 # unlisted one does not raise, it just fails to match, and the runs vanish from
 # the table as though they had never happened.
 PATTERN = re.compile(r'/([^/]+)/(val14|test14-hard|test14-random)/'
-                     r'(nonreactive|reactive|smart)/(baseline|occluded|random)/')
+                     r'(nonreactive|reactive|smart_open|smart)/(baseline|occluded|random)/')
 
 
 def collect(root):

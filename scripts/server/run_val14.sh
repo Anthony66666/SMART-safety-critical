@@ -148,7 +148,12 @@ case "$REACTIVITY" in
                  BASE_OBS=""; OCCLUDED_OBS=occluded_box_observation ;;
     reactive)    CHALLENGE=closed_loop_reactive_agents
                  BASE_OBS=""; OCCLUDED_OBS=occluded_idm_agents_observation ;;
-    smart)       CHALLENGE=closed_loop_reactive_agents
+    # smart_open is the same traffic model under a different label. The label
+    # is the point: results land under .../val14/smart_open/ beside the older
+    # .../val14/smart/ runs, which were produced with the population closed at
+    # t=0 and are kept as the comparison row. Same challenge, same
+    # observation, same budget -- only the path differs.
+    smart|smart_open) CHALLENGE=closed_loop_reactive_agents
                  BASE_OBS=smart_agents_observation
                  OCCLUDED_OBS=occluded_smart_agents_observation
                  # Every ray worker loads its own copy of the traffic model, so
@@ -161,7 +166,7 @@ case "$REACTIVITY" in
                  # headroom is enough depends on the planner as well, so the
                  # number is settled after the planner is known, below.
                  SMART_GPU_BUDGET=yes ;;
-    *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive | smart)" >&2; exit 1 ;;
+    *) echo "unknown REACTIVITY '$REACTIVITY' (nonreactive | reactive | smart | smart_open)" >&2; exit 1 ;;
 esac
 
 case "$MODE" in
@@ -173,7 +178,7 @@ case "$MODE" in
         # Control: same number of objects withheld per frame, chosen at random
         # rather than by sight line. Only meaningful against an occluded run
         # over the same scenarios.
-        if [ "$REACTIVITY" = smart ]; then
+        if [ "$REACTIVITY" = smart ] || [ "$REACTIVITY" = smart_open ]; then
             echo "random control is not wired for smart traffic yet" >&2; exit 1
         fi
         OBSERVATION="observation=random_withholding_observation"; TAG=random ;;
@@ -466,7 +471,7 @@ if [ -n "${DRY_RUN:-}" ]; then
                   fi ;;
         esac
     done
-    if [ "$REACTIVITY" = smart ]; then
+    if [ "$REACTIVITY" = smart ] || [ "$REACTIVITY" = smart_open ]; then
         ckpt=${SMART_CHECKPOINT:-$BENCH/checkpoints/bosch_nuplan_smart.ckpt}
         [ -e "$ckpt" ] || { echo "  missing: $ckpt" >&2; missing=1; }
         $PY -c 'import torch_geometric, torch_scatter, torch_cluster' 2>/dev/null \
