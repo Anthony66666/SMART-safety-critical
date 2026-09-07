@@ -77,7 +77,7 @@ def roll(scenario, model, steps, closed):
     if closed:
         # The old behaviour, reproduced by disabling the two new steps rather
         # than by checking out the old file: same code path otherwise.
-        observation._admit_entering_agents = lambda: None
+        observation._admit_entering_agents = lambda ego: None
         observation._retire_distant_agents = lambda ego: None
     observation.initialize()
     frames = []

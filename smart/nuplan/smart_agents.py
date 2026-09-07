@@ -60,10 +60,28 @@ TOKEN_STRIDE = 5
 # the scenario at initialize time instead.
 SMART_STEP_S = 0.1
 
-# Only these three have a token vocabulary; everything else nuPlan tracks --
-# cones, barriers, debris -- is static and is replayed from the log untouched.
-SIMULATED_TYPES = (TrackedObjectType.VEHICLE, TrackedObjectType.PEDESTRIAN,
-                   TrackedObjectType.BICYCLE)
+# What SMART drives, what it merely sees, and what it never touches.
+#
+# Vehicles are driven: their poses come from the model. Pedestrians and
+# cyclists are context: they go into the model's input so that the vehicles
+# yield to them, but their own poses are replayed from the log. That is the
+# official reactive challenge's arrangement too -- IDMAgents lists PEDESTRIAN
+# among its open_loop_detections_types -- and it is not a shortcut. A person
+# stepping out from behind a parked van is the case this benchmark exists for,
+# and replaying it keeps that step exactly as it happened rather than as a
+# model's guess of it. The cost is that a replayed pedestrian does not react to
+# the ego; in the log the ego was an expert who yielded, so the mismatch is
+# rare. Everything else nuPlan tracks -- cones, barriers, debris -- is static
+# and is replayed untouched; it has no token vocabulary to be driven with.
+DRIVEN_TYPES = (TrackedObjectType.VEHICLE,)
+CONTEXT_TYPES = (TrackedObjectType.PEDESTRIAN, TrackedObjectType.BICYCLE)
+SIMULATED_TYPES = DRIVEN_TYPES + CONTEXT_TYPES     # what goes into the model
+
+# Admission rules for vehicles the log introduces mid-scenario. See
+# _admit_entering_agents for why each exists.
+ADMIT_MIN_DISTANCE_M = 40.0   # closer than this is a detection, not an arrival
+ADMIT_MIN_SPEED = 0.5         # slower than this is parked, not traffic
+ADMIT_LANE_TOLERANCE_M = 3.0  # farther from any lane centreline than this is not on a road
 
 # Metres from the ego past which a simulated agent is dropped. Admitting the
 # cars the log introduces without ever retiring one lets the population grow
@@ -124,6 +142,10 @@ class SMARTAgents(AbstractObservation):
         self._current: Dict[str, object] = {}
         self._admitted: set = set()
         self._retired: set = set()
+        # Vehicles the log has that are replayed rather than driven: parked
+        # ones, ones that appeared too close to be an arrival, ones off any
+        # lane. They still exist for the planner; they just follow the log.
+        self._replayed: set = set()
         self._plan: Dict[str, torch.Tensor] = {}
         self._plan_start: Optional[int] = None
 
@@ -175,7 +197,8 @@ class SMARTAgents(AbstractObservation):
         # predicts nothing and the traffic freezes.
         while len(self._history) < HISTORY_STEPS:
             self._history.insert(0, self._history[0])
-        self._current = dict(self._history[-1][1])
+        self._current = {t: o for t, o in self._history[-1][1].items()
+                         if o.tracked_object_type in DRIVEN_TYPES}
 
     def _build_map(self) -> Dict:
         """Lanes and crosswalks around the start, taken once.
@@ -204,6 +227,7 @@ class SMARTAgents(AbstractObservation):
         self._current = {}
         self._admitted = set()
         self._retired = set()
+        self._replayed = set()
         self._plan = {}
         self._plan_start = None
 
@@ -218,44 +242,51 @@ class SMARTAgents(AbstractObservation):
         self._history.append((ego_state, agents))
         del self._history[:-HISTORY_STEPS]
 
-    def _admit_entering_agents(self) -> None:
-        """Let cars the log introduces mid-scenario into the simulation.
+    def _context_objects(self):
+        """Pedestrians, cyclists and replayed vehicles, as the log has them now."""
+        try:
+            objects = self._scenario.get_tracked_objects_at_iteration(
+                self._iteration).tracked_objects
+        except Exception:
+            return []
+        return [o for o in objects
+                if o.tracked_object_type in CONTEXT_TYPES
+                or (o.tracked_object_type in DRIVEN_TYPES
+                    and _track_id(o) in self._replayed)]
 
-        Without this the population is fixed at t=0: the agent set comes from
-        the history window, the history is written from our own simulated
-        agents, and nothing else can ever get in. Over fifteen seconds that
-        leaves less than half the traffic the log has -- 25 vehicles against
-        56 -- and it silently removes the case this benchmark exists to study,
-        since a car emerging from behind the van that hid it is, by
-        construction, a car entering the scene.
+    def _admit_entering_agents(self, ego_state) -> None:
+        """Let vehicles the log introduces mid-scenario into the simulation.
 
-        Only tracks never admitted before are let in. Re-admitting one that has
-        already been driven away would teleport it back to wherever the log
-        says it is, which is not where the simulation put it.
+        The population used to be fixed at t=0, which halved the traffic near
+        the ego by the end of a scenario and removed the case this benchmark
+        exists for. But a naive fix -- placing each new track at its logged
+        pose -- put newcomers on top of simulated cars 70% of the time and had
+        them driving sideways and off-road at several times the rate of cars
+        present from the start. The log's world and the simulated one have
+        diverged by then; a pose copied from one is wrong in the other.
 
-        A newcomer needs a full history window, and the log cannot supply one:
-        a track is new precisely because the log did not have it before, so
-        reading its past back gives holes. Measured, that left newcomers with 5
-        to 7 valid steps of 11 against everyone else's 11, and -- what actually
-        breaks -- only 26-30% of them had all three of the steps the tokenizer
-        reads, against 96-97% for the rest. SMART builds its motion tokens from
-        fixed anchors at steps 0, 5 and 10; miss those and the token degenerates,
-        which is what the sideways and reversing newcomers were.
+        So what is borrowed from the log is only the *entrance* -- where and
+        when a car arrives, and how fast. The pose is the simulation's:
 
-        So the history is synthesised rather than looked up: the agent is
-        carried backwards at the velocity it arrives with. That is not a
-        cosmetic choice either way -- an ablation over 11k tokens puts a
-        constant-velocity reconstruction at 20.93% next-token top-1 against
-        21.62% for real history, and a history with no motion in it at 20.39%
-        and 65.10% on top-10 against 70.60%. The reconstruction costs 0.7
-        points; the holes cost 5.5. And for the 40.6% of arrivals that are
-        stationary, carrying them backwards at zero velocity is exact.
-
-        Nothing is admitted into occupied space. Seventy percent of arrivals
-        landed within three metres of an existing agent, because the log's pose
-        is where the log's traffic is and ours has moved on. nuPlan's own IDM
-        builder does the same check when it places agents, and skipping is
-        cheap: the space clears and the next step tries again.
+        1. Only from the outside. Tracks first appear at a median 59 m, but a
+           quarter appear inside 40 m -- perception noticing a car that was
+           there all along. Those are not arrivals. They are replayed.
+        2. Snapped to a lane. Position and heading come from the nearest lane
+           centreline, as nuPlan's own IDM builder does, so the car is on the
+           road and facing along it -- the two things SMART's forward-only
+           token vocabulary cannot cope without. No lane nearby: replayed.
+        3. A history that follows the lane. The window is synthesised by
+           walking back along the centreline at arrival speed, so the tokenizer
+           finds all three of its anchors and the past it reads is on the
+           road, curves included.
+        4. Parked cars are not traffic. Arrivals slower than 0.5 m/s -- 40% of
+           them -- are replayed like any other static object. Handing them to
+           the model invites it to decide that a parked car should leave.
+        5. Nothing into occupied space. Actual box intersection against every
+           simulated vehicle, not a centre-distance guess; occupied means try
+           again next step, and the space clears on its own.
+        6. Farthest first, one at a time, so that a second arrival in the same
+           step is checked against the first.
         """
         if self._scenario is None:
             return
@@ -263,41 +294,134 @@ class SMARTAgents(AbstractObservation):
             present = self._scenario.get_tracked_objects_at_iteration(self._iteration)
         except Exception:
             return
-        entering = [o for o in present.tracked_objects
-                    if o.tracked_object_type in SIMULATED_TYPES
-                    and _track_id(o) not in self._admitted]
-        if not entering:
+        ex, ey = ego_state.center.x, ego_state.center.y
+        candidates = [o for o in present.tracked_objects
+                      if o.tracked_object_type in DRIVEN_TYPES
+                      and _track_id(o) not in self._admitted
+                      and _track_id(o) not in self._replayed]
+        if not candidates:
             return
+        candidates.sort(key=lambda o: -math.hypot(o.box.center.x - ex,
+                                                   o.box.center.y - ey))
 
-        occupied = [(o.box.center.x, o.box.center.y,
-                     0.5 * max(o.box.length, o.box.width))
-                    for o in self._current.values()]
-
-        for obj in entering:
-            x, y = obj.box.center.x, obj.box.center.y
-            reach = 0.5 * max(obj.box.length, obj.box.width)
-            if any((x - ox) ** 2 + (y - oy) ** 2 < (reach + orad) ** 2
-                   for ox, oy, orad in occupied):
-                continue          # try again next step, once the space clears
+        occupied = [o.box.geometry for o in self._current.values()]
+        for obj in candidates:
             track = _track_id(obj)
-            self._current[track] = obj
-            self._templates.setdefault(track, obj)
-            self._admitted.add(track)
-            occupied.append((x, y, reach))
-            self._synthesise_history(track, obj)
+            velocity = getattr(obj, 'velocity', None)
+            speed = math.hypot(velocity.x, velocity.y) if velocity is not None else 0.0
+            distance = math.hypot(obj.box.center.x - ex, obj.box.center.y - ey)
 
-    def _synthesise_history(self, track: str, obj) -> None:
-        """Fill the whole window by carrying the agent back at its velocity."""
-        velocity = getattr(obj, 'velocity', None)
-        vx = velocity.x if velocity is not None else 0.0
-        vy = velocity.y if velocity is not None else 0.0
+            if speed < ADMIT_MIN_SPEED or distance < ADMIT_MIN_DISTANCE_M:
+                self._replayed.add(track)
+                continue
+            lane, progress = self._lane_under(obj.box.center)
+            if lane is None:
+                self._replayed.add(track)
+                continue
+
+            pose = self._pose_on_lane(lane, progress)
+            box = OrientedBox.from_new_pose(obj.box, pose)
+            if any(box.geometry.intersects(other) for other in occupied):
+                continue                    # retry next step
+
+            heading = pose.heading
+            arrival = self._at_pose(obj, pose, StateVector2D(
+                speed * math.cos(heading), speed * math.sin(heading)))
+            self._current[track] = arrival
+            self._templates.setdefault(track, arrival)
+            self._admitted.add(track)
+            occupied.append(box.geometry)
+            self._synthesise_history(track, arrival, lane, progress, speed)
+
+    def _lane_under(self, point):
+        """The lane an arriving car is on, and its progress along it.
+
+        The same rule nuPlan's IDM builder applies: among the lanes at this
+        point, the one whose direction best matches, then its arc length.
+        Returns (None, None) when there is no lane within tolerance, which is a
+        car park or a driveway -- not somewhere the model was trained to drive.
+        """
+        map_api = self._scenario.map_api
+        try:
+            from nuplan.common.maps.maps_datatypes import SemanticMapLayer
+            layers = [SemanticMapLayer.LANE, SemanticMapLayer.LANE_CONNECTOR]
+            nearby = map_api.get_proximal_map_objects(
+                Point2D(point.x, point.y), ADMIT_LANE_TOLERANCE_M * 2, layers)
+        except Exception:
+            return None, None
+        best, best_score = None, None
+        for layer in layers:
+            for lane in nearby.get(layer, []):
+                try:
+                    path = lane.baseline_path
+                    progress = path.get_nearest_arc_length_from_position(
+                        Point2D(point.x, point.y))
+                    on_lane = path.get_nearest_pose_from_position(Point2D(point.x, point.y))
+                except Exception:
+                    continue
+                offset = math.hypot(on_lane.x - point.x, on_lane.y - point.y)
+                if offset > ADMIT_LANE_TOLERANCE_M:
+                    continue
+                turn = abs(math.atan2(math.sin(on_lane.heading - point.heading),
+                                      math.cos(on_lane.heading - point.heading)))
+                # Lateral offset in metres plus heading mismatch in radians:
+                # a car a metre off a lane it is aligned with beats one on the
+                # centreline of a lane running the other way.
+                score = offset + turn
+                if best_score is None or score < best_score:
+                    best, best_score = (lane, progress), score
+        return best if best is not None else (None, None)
+
+    @staticmethod
+    def _pose_on_lane(lane, progress) -> StateSE2:
+        path = lane.baseline_path
+        progress = min(max(progress, 0.0), path.length)
+        point = path.linestring.interpolate(progress)
+        heading = path.get_nearest_pose_from_position(Point2D(point.x, point.y)).heading
+        return StateSE2(point.x, point.y, heading)
+
+    def _synthesise_history(self, track, arrival, lane, progress, speed) -> None:
+        """Fill the window by walking back along the lane at arrival speed.
+
+        A straight-line extrapolation leaves the road on any curved approach,
+        and the model is then shown a past that is off the map. Following the
+        centreline backwards -- into the predecessor lane when the current one
+        runs out -- keeps every synthesised pose on the road. For a stationary
+        arrival the walk covers no distance and every frame is the same pose,
+        which is exactly what a parked car's history looks like.
+        """
         last = len(self._history) - 1
         for j, (_, agents) in enumerate(self._history):
-            back = (last - j) * self._stride * self._step_time
-            pose = StateSE2(obj.box.center.x - vx * back,
-                            obj.box.center.y - vy * back,
-                            obj.box.center.heading)
-            agents[track] = self._at_pose(obj, pose, velocity)
+            back = (last - j) * self._stride * self._step_time * speed
+            pose = self._walk_back(lane, progress, back)
+            if pose is None:
+                # Off the end of every predecessor: straight line, on-lane
+                # heading, and accept that this frame is approximate.
+                h = arrival.box.center.heading
+                pose = StateSE2(arrival.box.center.x - back * math.cos(h),
+                                arrival.box.center.y - back * math.sin(h), h)
+            agents[track] = self._at_pose(arrival, pose, arrival.velocity)
+
+    def _walk_back(self, lane, progress, distance, depth=4):
+        """A pose `distance` metres back along the lane graph, or None."""
+        if distance <= progress:
+            return self._pose_on_lane(lane, progress - distance)
+        if depth == 0:
+            return None
+        remaining = distance - progress
+        try:
+            predecessors = list(lane.incoming_edges)
+        except Exception:
+            predecessors = []
+        for previous in predecessors:
+            try:
+                length = previous.baseline_path.length
+            except Exception:
+                continue
+            pose = self._walk_back(previous, length, remaining, depth - 1)
+            if pose is not None:
+                return pose
+        return None
 
     def _retire_distant_agents(self, ego_state) -> None:
         """Drop agents that have left the ego's neighbourhood for good."""
@@ -323,10 +447,13 @@ class SMARTAgents(AbstractObservation):
         # `stride`-th simulation step contributes -- and the ego written in is
         # the simulated one, which is the whole point of a reactive model.
         if iteration.index % self._stride == 0:
-            self._admit_entering_agents()
+            self._admit_entering_agents(ego_state)
             self._retire_distant_agents(ego_state)
+            # The frame the model conditions on: the vehicles it drives, at the
+            # poses it drove them to, plus the pedestrians and cyclists it only
+            # watches, at the poses the log has them at right now.
             self._remember(ego_state, DetectionsTracks(TrackedObjects(
-                list(self._current.values()))))
+                list(self._current.values()) + self._context_objects())))
 
         # `not self._plan` is not the same question as "has a rollout run".
         # An empty plan also means the scene had nothing to predict, and using
@@ -523,7 +650,9 @@ class SMARTAgents(AbstractObservation):
         # rollout -- for up to half a second -- and _remember then wrote that
         # absence into the history window as a hole at exactly the anchor steps
         # the tokenizer reads.
-        self._current.update(moved)
+        for track, obj in moved.items():
+            if track in self._current:      # context rows get plans too; ignore them
+                self._current[track] = obj
 
     @staticmethod
     def _at_pose(original, pose: StateSE2, velocity=None):
@@ -563,11 +692,12 @@ class SMARTAgents(AbstractObservation):
         no token vocabulary and do not move, so replaying them is both correct
         and cheaper than asking a model to predict that they stay put.
         """
-        static = [obj for obj in
-                  self._scenario.get_tracked_objects_at_iteration(
-                      self._iteration).tracked_objects
-                  if obj.tracked_object_type not in SIMULATED_TYPES]
-        return DetectionsTracks(TrackedObjects(list(self._current.values()) + static))
+        replayed = [obj for obj in
+                    self._scenario.get_tracked_objects_at_iteration(
+                        self._iteration).tracked_objects
+                    if obj.tracked_object_type not in DRIVEN_TYPES
+                    or _track_id(obj) in self._replayed]
+        return DetectionsTracks(TrackedObjects(list(self._current.values()) + replayed))
 
 
 def resolve_checkpoint(checkpoint_path: str) -> str:
