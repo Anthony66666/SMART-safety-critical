@@ -77,10 +77,11 @@ DRIVEN_TYPES = (TrackedObjectType.VEHICLE,)
 CONTEXT_TYPES = (TrackedObjectType.PEDESTRIAN, TrackedObjectType.BICYCLE)
 SIMULATED_TYPES = DRIVEN_TYPES + CONTEXT_TYPES     # what goes into the model
 
-# Admission rules for vehicles the log introduces mid-scenario. See
-# _admit_entering_agents for why each exists.
-ADMIT_MIN_DISTANCE_M = 40.0   # closer than this is a detection, not an arrival
-ADMIT_MIN_SPEED = 0.5         # slower than this is parked, not traffic
+# Admission of vehicles the log introduces mid-scenario. See
+# _admit_entering_agents for the rules. There used to be a distance gate here
+# too -- nothing inside 40 m was driven -- and it was removed on purpose: a car
+# emerging close to the ego is the dangerous case this benchmark exists for,
+# and a replayed car does not brake for a planner that fails to yield.
 ADMIT_LANE_TOLERANCE_M = 3.0  # farther from any lane centreline than this is not on a road
 
 # Metres from the ego past which a simulated agent is dropped. Admitting the
@@ -268,9 +269,13 @@ class SMARTAgents(AbstractObservation):
         So what is borrowed from the log is only the *entrance* -- where and
         when a car arrives, and how fast. The pose is the simulation's:
 
-        1. Only from the outside. Tracks first appear at a median 59 m, but a
-           quarter appear inside 40 m -- perception noticing a car that was
-           there all along. Those are not arrivals. They are replayed.
+        1. From anywhere. There was a 40 m gate here -- a quarter of tracks
+           first appear inside it, perception noticing a car that was there
+           all along -- and it was removed. A car emerging close to the ego is
+           the dangerous case this benchmark exists for, and sending it to
+           replay would keep it in the scene but not reacting: it follows the
+           expert's log, and does not brake for a planner that fails to
+           yield. Rule 5 is what kept the gate honest, and rule 5 stays.
         2. Snapped to a lane. Position and heading come from the nearest lane
            centreline, as nuPlan's own IDM builder does, so the car is on the
            road and facing along it -- the two things SMART's forward-only
@@ -279,9 +284,13 @@ class SMARTAgents(AbstractObservation):
            walking back along the centreline at arrival speed, so the tokenizer
            finds all three of its anchors and the past it reads is on the
            road, curves included.
-        4. Parked cars are not traffic. Arrivals slower than 0.5 m/s -- 40% of
-           them -- are replayed like any other static object. Handing them to
-           the model invites it to decide that a parked car should leave.
+        4. Parked, not stopped. A stationary arrival off any lane is a parked
+           car and is replayed like any other static object. A stationary
+           arrival *on* a lane is a car waiting -- at a light, behind
+           traffic -- and is driven: its synthesised history is the same pose
+           eleven times, which is what a waiting car's history is, and it
+           pulling out is a case worth having. Rule 2 already draws this
+           line, so no speed threshold is needed.
         5. Nothing into occupied space. Actual box intersection against every
            simulated vehicle, not a centre-distance guess; occupied means try
            again next step, and the space clears on its own.
@@ -304,16 +313,15 @@ class SMARTAgents(AbstractObservation):
         candidates.sort(key=lambda o: -math.hypot(o.box.center.x - ex,
                                                    o.box.center.y - ey))
 
-        occupied = [o.box.geometry for o in self._current.values()]
+        # The ego's own footprint too. With no distance gate a car that the
+        # log had just ahead of the expert's ego can otherwise be placed inside
+        # ours, which was where the planner put it, not where the log did.
+        occupied = ([o.box.geometry for o in self._current.values()]
+                    + [ego_state.car_footprint.geometry])
         for obj in candidates:
             track = _track_id(obj)
             velocity = getattr(obj, 'velocity', None)
             speed = math.hypot(velocity.x, velocity.y) if velocity is not None else 0.0
-            distance = math.hypot(obj.box.center.x - ex, obj.box.center.y - ey)
-
-            if speed < ADMIT_MIN_SPEED or distance < ADMIT_MIN_DISTANCE_M:
-                self._replayed.add(track)
-                continue
             lane, progress = self._lane_under(obj.box.center)
             if lane is None:
                 self._replayed.add(track)

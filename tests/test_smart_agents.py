@@ -46,7 +46,10 @@ def cone(track, x, y):
 
 
 def ego_at(x=0.0, y=0.0):
-    footprint = SimpleNamespace(oriented_box=OrientedBox(StateSE2(x, y, 0.0), 5.0, 2.0, 1.7))
+    box = OrientedBox(StateSE2(x, y, 0.0), 5.0, 2.0, 1.7)
+    # Real CarFootprint exposes .geometry; the occupancy check reads it so
+    # nothing is admitted into the ego's own footprint.
+    footprint = SimpleNamespace(oriented_box=box, geometry=box.geometry)
     return SimpleNamespace(
         center=StateSE2(x, y, 0.0),
         car_footprint=footprint,
