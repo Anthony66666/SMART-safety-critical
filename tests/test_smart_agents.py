@@ -62,16 +62,26 @@ class FakeScenario:
     rather than assume it.
     """
 
-    def __init__(self, objects, database_interval=0.1):
+    def __init__(self, objects, database_interval=0.1, arriving=None):
         self.objects = objects
+        # {iteration: [objects]} -- what the log introduces partway through,
+        # which is the case a closed population cannot represent.
+        self.arriving = arriving or {}
         self.database_interval = database_interval
         self.map_api = SimpleNamespace(map_name='fake')
+
+    def _at(self, iteration):
+        out = list(self.objects)
+        for when, objs in self.arriving.items():
+            if iteration >= when:
+                out.extend(objs)
+        return out
 
     def get_ego_state_at_iteration(self, iteration):
         return ego_at(float(iteration), 0.0)
 
     def get_tracked_objects_at_iteration(self, iteration):
-        return DetectionsTracks(TrackedObjects(list(self.objects)))
+        return DetectionsTracks(TrackedObjects(self._at(iteration)))
 
     def get_ego_past_trajectory(self, iteration, time_horizon, num_samples=None):
         return (ego_at(-float(i), 0.0) for i in range(num_samples, 0, -1))
@@ -83,7 +93,13 @@ class FakeScenario:
 
 
 class StubModel:
-    """Sends every agent 100 m north of wherever it was asked about.
+    """Sends every agent 30 m north of wherever it was asked about.
+
+    Far enough to be unmistakably a move, close enough to stay inside
+    RETIRE_RADIUS_M -- a 100 m jump put every agent outside the ego's
+    neighbourhood on the first rollout, which emptied the scene and made these
+    tests measure the empty case rather than the one they name.
+    
 
     Mimics the two prep hooks the real SMART LightningModule exposes so the
     observation's rollout path can be exercised without either. Both are pure
@@ -104,11 +120,11 @@ class StubModel:
         self.calls += 1
         count = int(data['agent']['num_nodes'])
         traj = torch.zeros(count, 80, 2)
-        traj[:, :, 1] = 100.0
+        traj[:, :, 1] = 30.0
         return {'pred_traj': traj, 'pred_head': torch.zeros(count, 80)}
 
 
-def make(objects, database_interval=0.1, **kwargs):
+def make(objects, database_interval=0.1, arriving=None, **kwargs):
     """An observation whose model and map are stubs.
 
     The map needs a real nuPlan map API and the model needs an 85 MB
@@ -116,7 +132,7 @@ def make(objects, database_interval=0.1, **kwargs):
     so `_agent_tensors` -- the part that has to match the layout the checkpoint
     was trained on -- is tested directly instead, below.
     """
-    scenario = FakeScenario(objects, database_interval)
+    scenario = FakeScenario(objects, database_interval, arriving)
     observation = SMARTAgents(StubModel(), scenario, device='cpu', **kwargs)
     observation._build_map = lambda: {}
 
@@ -200,7 +216,7 @@ def test_agents_move_to_the_predicted_pose():
     step(observation, 0, ego_at())
     moved = observation.get_observation().tracked_objects
     predicted = [o for o in moved if o.track_token == 'a'][0]
-    assert predicted.box.center.y == pytest.approx(100.0)
+    assert predicted.box.center.y == pytest.approx(30.0)
 
 
 def test_agents_keep_their_identity_and_size_through_a_rollout():
@@ -355,3 +371,33 @@ def test_velocity_is_recomputed_from_the_motion():
     # The stub advances one metre per 10 Hz step, so 10 m/s northwards.
     assert moved.velocity.y == pytest.approx(10.0, abs=0.5)
     assert moved.velocity.x == pytest.approx(0.0, abs=0.5)
+
+
+def test_agents_entering_the_scene_are_admitted():
+    """A closed population removes the case this benchmark exists to study.
+
+    The agent set used to come from the history window, and the history was
+    written from the simulation's own agents, so nothing could ever get in.
+    A car emerging from behind the vehicle that hid it is, by construction, a
+    car entering the scene.
+    """
+    late = agent('late', 5.0, 5.0)
+    observation = make([agent('a', 10.0, 0.0)], arriving={3: [late]})
+    observation.initialize()
+    assert 'late' not in {o.track_token for o in
+                          observation.get_observation().tracked_objects}
+    for index in range(6):
+        step(observation, index, ego_at(float(index), 0.0))
+    assert 'late' in {o.track_token for o in
+                      observation.get_observation().tracked_objects}
+
+
+def test_agents_that_leave_the_neighbourhood_are_retired():
+    """Admitting without retiring grows the population past the log's own."""
+    from smart.nuplan.smart_agents import RETIRE_RADIUS_M
+
+    observation = make([agent('far', RETIRE_RADIUS_M + 50.0, 0.0)])
+    observation.initialize()
+    step(observation, 0, ego_at(0.0, 0.0))
+    assert 'far' not in {o.track_token for o in
+                         observation.get_observation().tracked_objects}

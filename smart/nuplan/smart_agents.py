@@ -65,6 +65,15 @@ SMART_STEP_S = 0.1
 SIMULATED_TYPES = (TrackedObjectType.VEHICLE, TrackedObjectType.PEDESTRIAN,
                    TrackedObjectType.BICYCLE)
 
+# Metres from the ego past which a simulated agent is dropped. Admitting the
+# cars the log introduces without ever retiring one lets the population grow
+# past the log's own -- 179 against 107 over fifteen seconds -- because the log
+# has traffic leaving too. Distance rather than "the log no longer lists it":
+# the whole point of a traffic model is that it may drive a car somewhere the
+# log did not, so its own departure is the thing to measure. Beyond this there
+# is no map for them either, and the model's widest attention radius is 60 m.
+RETIRE_RADIUS_M = 100.0
+
 
 def _track_id(tracked_object) -> str:
     return str(tracked_object.track_token or tracked_object.token)
@@ -113,8 +122,10 @@ class SMARTAgents(AbstractObservation):
         self._history: List = []
         self._templates: Dict[str, object] = {}
         self._current: Dict[str, object] = {}
+        self._admitted: set = set()
+        self._retired: set = set()
         self._plan: Dict[str, torch.Tensor] = {}
-        self._plan_start = 0
+        self._plan_start: Optional[int] = None
 
     def observation_type(self) -> Type[Observation]:
         """Inherited, see superclass."""
@@ -191,8 +202,10 @@ class SMARTAgents(AbstractObservation):
         self._history = []
         self._templates = {}
         self._current = {}
+        self._admitted = set()
+        self._retired = set()
         self._plan = {}
-        self._plan_start = 0
+        self._plan_start = None
 
     def _remember(self, ego_state, detections: DetectionsTracks) -> None:
         """Append one 10 Hz frame, keeping only the window SMART reads."""
@@ -201,8 +214,83 @@ class SMARTAgents(AbstractObservation):
             if obj.tracked_object_type in SIMULATED_TYPES:
                 agents[_track_id(obj)] = obj
                 self._templates.setdefault(_track_id(obj), obj)
+        self._admitted.update(agents)
         self._history.append((ego_state, agents))
         del self._history[:-HISTORY_STEPS]
+
+    def _admit_entering_agents(self) -> None:
+        """Let cars the log introduces mid-scenario into the simulation.
+
+        Without this the population is fixed at t=0: the agent set comes from
+        the history window, the history is written from our own simulated
+        agents, and nothing else can ever get in. Over fifteen seconds that
+        leaves less than half the traffic the log has -- 25 vehicles against
+        56 -- and it silently removes the case this benchmark exists to study,
+        since a car emerging from behind the van that hid it is, by
+        construction, a car entering the scene.
+
+        Only tracks never admitted before are let in. Re-admitting one that has
+        already been driven away would teleport it back to wherever the log
+        says it is, which is not where the simulation put it.
+
+        A newcomer is backfilled into the history window from the log. Not
+        because SMART needs the full second -- an ablation over 11k tokens puts
+        the three anchor steps it actually reads at 21.43% next-token top-1
+        against 21.62% for everything, which is noise. The one case that does
+        cost is a history showing no motion at all: 20.39%, and 65.10% on
+        top-10 against 70.60%. A newcomer dropped in with a single frame is
+        exactly that case, so it would be read as parked and then have to
+        accelerate from rest. The log has its real past, so backfilling is
+        cheaper than any approximation of it.
+        """
+        if self._scenario is None:
+            return
+        try:
+            present = self._scenario.get_tracked_objects_at_iteration(self._iteration)
+        except Exception:
+            return
+        entering = [o for o in present.tracked_objects
+                    if o.tracked_object_type in SIMULATED_TYPES
+                    and _track_id(o) not in self._admitted]
+        if not entering:
+            return
+
+        for obj in entering:
+            track = _track_id(obj)
+            self._current[track] = obj
+            self._templates.setdefault(track, obj)
+            self._admitted.add(track)
+
+        # Backfill: history frame j sits `(len - 1 - j) * stride` iterations
+        # back from now, so each one can be read straight out of the log.
+        wanted = {_track_id(o) for o in entering}
+        last = len(self._history) - 1
+        for j, (_, agents) in enumerate(self._history):
+            iteration = self._iteration - (last - j) * self._stride
+            if iteration < 0:
+                continue
+            try:
+                past = self._scenario.get_tracked_objects_at_iteration(iteration)
+            except Exception:
+                continue
+            for obj in past.tracked_objects:
+                if _track_id(obj) in wanted:
+                    agents[_track_id(obj)] = obj
+
+    def _retire_distant_agents(self, ego_state) -> None:
+        """Drop agents that have left the ego's neighbourhood for good."""
+        x, y = ego_state.center.x, ego_state.center.y
+        gone = [t for t, o in self._current.items()
+                if (o.box.center.x - x) ** 2 + (o.box.center.y - y) ** 2
+                > RETIRE_RADIUS_M ** 2]
+        for track in gone:
+            self._current.pop(track, None)
+            self._plan.pop(track, None)
+            # Remembering that it is gone is the part that has to be explicit.
+            # The rollout rebuilds its plan from every track in the history
+            # window, and the history keeps older frames, so without this the
+            # next _advance puts the retired agent straight back.
+            self._retired.add(track)
 
     def update_observation(self, iteration, next_iteration, history) -> None:
         """Inherited, see superclass."""
@@ -213,10 +301,16 @@ class SMARTAgents(AbstractObservation):
         # `stride`-th simulation step contributes -- and the ego written in is
         # the simulated one, which is the whole point of a reactive model.
         if iteration.index % self._stride == 0:
+            self._admit_entering_agents()
+            self._retire_distant_agents(ego_state)
             self._remember(ego_state, DetectionsTracks(TrackedObjects(
                 list(self._current.values()))))
 
-        if self._iteration - self._plan_start >= self._replan_steps or not self._plan:
+        # `not self._plan` is not the same question as "has a rollout run".
+        # An empty plan also means the scene had nothing to predict, and using
+        # it as the trigger re-ran inference on every step of an empty scene.
+        if self._plan_start is None or \
+                self._iteration - self._plan_start >= self._replan_steps:
             self._rollout(ego_state)
             self._plan_start = self._iteration
         self._advance()
@@ -301,7 +395,8 @@ class SMARTAgents(AbstractObservation):
         the model is being asked to produce.
         """
         steps = self._horizon()
-        tracks = sorted({t for _, agents in self._history for t in agents})
+        tracks = sorted({t for _, agents in self._history for t in agents}
+                        - self._retired)
         if not tracks:
             return None
         self._rows = {track: index for index, track in enumerate(tracks)}
@@ -330,7 +425,11 @@ class SMARTAgents(AbstractObservation):
             valid[av_index, step] = True
 
             for track, obj in agents.items():
-                row = self._rows[track]
+                # Retired tracks are still in the older history frames but have
+                # no row: they were dropped from `tracks` above.
+                row = self._rows.get(track)
+                if row is None:
+                    continue
                 position[row, step, 0] = obj.box.center.x
                 position[row, step, 1] = obj.box.center.y
                 heading[row, step] = obj.box.center.heading
